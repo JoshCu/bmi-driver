@@ -15,25 +15,32 @@ fn main() -> Result<(), BmiError> {
     preload_dependencies()?;
 
     // Create runner from config
-    let mut runner = ModelRunner::from_config(
-        "/home/josh/code/JoshCu/hf_resample/output/time_test/config/realization.json",
-    )?;
 
-    // Optionally set custom middleware path
-    // runner.set_fortran_middleware("libiso_c_bmi.so");
+    let db_path = PathBuf::from(
+        "/home/josh/code/JoshCu/hf_resample/output/speed_test/config/speed_test_subset.gpkg",
+    );
+    // Initialize SQLite connection
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let catchments_query = "SELECT divide_id FROM 'divides'";
 
-    // Get all locations from forcings
-    // (you'd need to initialize forcings first to get this, or know them ahead of time)
-    let locations = vec!["cat-2863621"];
+    let mut stmt = conn.prepare(&catchments_query).unwrap();
+
+    let rows = stmt
+        .query_map([], |row| Ok(row.get::<_, String>(0)?))
+        .unwrap();
+    let locations = rows.collect::<Result<Vec<_>, _>>().unwrap();
 
     for location in locations {
+        let mut runner = ModelRunner::from_config(
+            "/home/josh/code/JoshCu/hf_resample/output/speed_test/config/realization.json",
+        )?;
         println!("=== Processing {} ===", location);
 
         // Initialize for this location
-        runner.initialize(location)?;
+        runner.initialize(&location)?;
 
-        println!("Models loaded: {}", runner.model_count());
-        println!("Total timesteps: {}", runner.total_steps());
+        // println!("Models loaded: {}", runner.model_count());
+        // println!("Total timesteps: {}", runner.total_steps());
 
         // Run all timesteps
         let mut outputs: Vec<f64> = Vec::new();
@@ -50,14 +57,14 @@ fn main() -> Result<(), BmiError> {
             // Or get all configured outputs
             let all_outputs = runner.get_outputs()?;
 
-            if runner.current_step() % 1 == 0 {
-                println!(
-                    "Step {}: {} = {:.9}",
-                    runner.current_step(),
-                    main_var,
-                    q_out
-                );
-            }
+            // if runner.current_step() % 1 == 0 {
+            //     println!(
+            //         "Step {}: {} = {:.9}",
+            //         runner.current_step(),
+            //         main_var,
+            //         q_out
+            //     );
+            // }
         }
 
         println!("Completed {} timesteps", outputs.len());
