@@ -7,72 +7,82 @@ use bmi::{
     preload_dependencies, Bmi, BmiC, BmiError, BmiExt, BmiFortran, Forcings, ForcingsExt,
     ModelRunner, NetCdfForcings,
 };
-
-use std::env;
 use std::path::PathBuf;
+use std::process::{Child, Command};
 
 fn main() -> Result<(), BmiError> {
-    preload_dependencies()?;
+    let args: Vec<String> = std::env::args().collect();
 
-    // Create runner from config
+    if args.len() >= 2 {
+        return run_single_location(&args[1]);
+    }
+
+    preload_dependencies()?;
 
     let db_path = PathBuf::from(
         "/home/josh/code/JoshCu/hf_resample/output/speed_test/config/speed_test_subset.gpkg",
     );
-    // Initialize SQLite connection
     let conn = rusqlite::Connection::open(&db_path).unwrap();
-    let catchments_query = "SELECT divide_id FROM 'divides'";
-
-    let mut stmt = conn.prepare(&catchments_query).unwrap();
-
+    let mut stmt = conn.prepare("SELECT divide_id FROM 'divides'").unwrap();
     let rows = stmt
         .query_map([], |row| Ok(row.get::<_, String>(0)?))
         .unwrap();
-    let locations = rows.collect::<Result<Vec<_>, _>>().unwrap();
+    let locations: Vec<String> = rows.flatten().collect();
+
+    let max_parallel = 8;
+    let mut handles: Vec<Child> = Vec::new();
 
     for location in locations {
-        let mut runner = ModelRunner::from_config(
-            "/home/josh/code/JoshCu/hf_resample/output/speed_test/config/realization.json",
-        )?;
-        println!("=== Processing {} ===", location);
+        // Wait if we have too many running
+        while handles.len() >= max_parallel {
+            // Find and remove one finished process
+            let mut finished_idx = None;
+            for (i, h) in handles.iter_mut().enumerate() {
+                if h.try_wait().ok().flatten().is_some() {
+                    finished_idx = Some(i);
+                    break;
+                }
+            }
 
-        // Initialize for this location
-        runner.initialize(&location)?;
-
-        // println!("Models loaded: {}", runner.model_count());
-        // println!("Total timesteps: {}", runner.total_steps());
-
-        // Run all timesteps
-        let mut outputs: Vec<f64> = Vec::new();
-        let main_var = runner.get_main_output_name()?;
-
-        while runner.has_more_steps() {
-            runner.update()?;
-
-            // Get main output
-            let q_out = runner.get_main_output()?;
-
-            outputs.push(q_out);
-
-            // Or get all configured outputs
-            let all_outputs = runner.get_outputs()?;
-
-            // if runner.current_step() % 1 == 0 {
-            //     println!(
-            //         "Step {}: {} = {:.9}",
-            //         runner.current_step(),
-            //         main_var,
-            //         q_out
-            //     );
-            // }
+            if let Some(idx) = finished_idx {
+                handles.remove(idx);
+            } else {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
         }
 
-        println!("Completed {} timesteps", outputs.len());
-
-        // Finalize before processing next location
-        runner.finalize()?;
+        let child = Command::new(&args[0])
+            .arg(&location)
+            .spawn()
+            .expect("Failed to spawn");
+        handles.push(child);
     }
 
+    // Wait for remaining
+    for mut h in handles {
+        h.wait().ok();
+    }
+
+    Ok(())
+}
+
+fn run_single_location(location: &str) -> Result<(), BmiError> {
+    preload_dependencies()?;
+
+    let mut runner = ModelRunner::from_config(
+        "/home/josh/code/JoshCu/hf_resample/output/speed_test/config/realization.json",
+    )?;
+
+    runner.initialize(location)?;
+
+    let mut outputs: Vec<f64> = Vec::new();
+    while runner.has_more_steps() {
+        runner.update()?;
+        outputs.push(runner.get_main_output()?);
+    }
+
+    println!("Completed {} timesteps for {}", outputs.len(), location);
+    runner.finalize()?;
     Ok(())
 }
 
