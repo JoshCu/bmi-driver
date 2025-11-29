@@ -15,69 +15,59 @@
 //! The crate also provides a `Forcings` trait for reading forcing data, with a NetCDF
 //! implementation (`NetCdfForcings`) for reading from NetCDF files.
 //!
+//! ## Model Runner
+//!
+//! The `ModelRunner` provides a high-level interface for running multiple BMI models
+//! together based on a realization configuration file.
+//!
 //! ## Example
 //!
 //! ```no_run
-//! use bmi::{Bmi, BmiExt, BmiC, BmiFortran, preload_dependencies};
-//! use bmi::{Forcings, ForcingsExt, NetCdfForcings};
+//! use bmi::ModelRunner;
 //!
 //! fn main() -> Result<(), bmi::BmiError> {
-//!     // Preload dependencies (libm, etc.)
-//!     preload_dependencies()?;
+//!     // Load configuration and create runner
+//!     let mut runner = ModelRunner::from_config("realization.json")?;
 //!
-//!     // Load a C BMI model
-//!     let mut model = BmiC::load(
-//!         "my_model",
-//!         "/path/to/libmodel.so",
-//!         "register_bmi",
-//!     )?;
+//!     // Initialize for a specific catchment
+//!     runner.initialize("cat-123")?;
 //!
-//!     // Initialize
-//!     model.initialize("/path/to/config.yml")?;
+//!     // Run all timesteps
+//!     while runner.has_more_steps() {
+//!         runner.update()?;
 //!
-//!     // Load forcing data from NetCDF
-//!     let mut forcings = NetCdfForcings::new("my_forcings");
-//!     forcings.initialize("/path/to/forcings.nc")?;
-//!
-//!     // Get forcing variable names
-//!     for name in forcings.get_output_var_names()? {
-//!         println!("Forcing var: {} [{}]", name, forcings.get_var_units(&name)?);
+//!         // Get outputs
+//!         let q_out = runner.get_main_output()?;
+//!         println!("Step {}: Q_OUT = {:.6}", runner.current_step(), q_out);
 //!     }
 //!
-//!     // Run the model with forcing data
-//!     let location = "cat-123";
-//!     let mut step = 0;
-//!     while model.get_current_time()? < model.get_end_time()? {
-//!         // Get forcing value at current timestep (auto-typed)
-//!         let temp = forcings.get_value_at_index("TMP_2maboveground", location, step)?;
-//!         model.set_value("SFCTMP", &[temp])?;
-//!
-//!         model.update()?;
-//!         step += 1;
-//!     }
-//!
-//!     model.finalize()?;
-//!     forcings.finalize()?;
+//!     runner.finalize()?;
 //!     Ok(())
 //! }
 //! ```
 
 mod adapter_c;
 mod adapter_fortran;
+mod adapter_sloth;
 mod bmi_ffi;
+pub mod config;
 mod error;
 mod forcings;
 mod forcings_netcdf;
 mod library;
+mod runner;
 mod traits;
 
 // Re-export the main types
 pub use adapter_c::BmiC;
 pub use adapter_fortran::BmiFortran;
+pub use adapter_sloth::BmiSloth;
+pub use config::{BmiAdapterType, ModuleConfig, RealizationConfig};
 pub use error::{BmiError, BmiResult};
 pub use forcings::{ForcingVarInfo, Forcings, ForcingsExt};
 pub use forcings_netcdf::{NetCdfForcings, NetCdfForcingsConfig};
 pub use library::preload_dependencies;
+pub use runner::{ModelInstance, ModelRunner, VarSource};
 pub use traits::{Bmi, BmiExt, BmiValue, VarType};
 
 // For backwards compatibility, also export BmiC as BmiModel

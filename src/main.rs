@@ -5,98 +5,66 @@
 
 use bmi::{
     preload_dependencies, Bmi, BmiC, BmiError, BmiExt, BmiFortran, Forcings, ForcingsExt,
-    NetCdfForcings,
+    ModelRunner, NetCdfForcings,
 };
+
 use std::env;
 use std::path::PathBuf;
 
 fn main() -> Result<(), BmiError> {
-    let args: Vec<String> = env::args().collect();
-
-    if args.len() < 5 {
-        eprintln!(
-            "Usage: {} <model_type> <library_path> <registration_func> <config_file> [middleware_library]",
-            args[0]
-        );
-        eprintln!();
-        eprintln!("Model types: c, fortran");
-        eprintln!();
-        eprintln!("Examples:");
-        eprintln!(
-            "  {} c ./libheat.so register_bmi_heat ./config.yaml",
-            args[0]
-        );
-        eprintln!(
-            "  {} fortran ./libfortran_model.so create_bmi ./config.yaml ./libbmi_fortran.so",
-            args[0]
-        );
-        eprintln!(
-            "  {} fortran ./libfortran_model.so create_bmi ./config.yaml  # if middleware is in same library",
-            args[0]
-        );
-        std::process::exit(1);
-    }
-
-    let model_type = &args[1];
-    let library_path = PathBuf::from(&args[2]);
-    let registration_func = &args[3];
-    let config_file = PathBuf::from(&args[4]);
-    let middleware_path = args.get(5).map(PathBuf::from);
-
-    println!("Loading BMI model...");
-    println!("  Type: {}", model_type);
-    println!("  Library: {}", library_path.display());
-    println!("  Registration function: {}", registration_func);
-    println!("  Config file: {}", config_file.display());
-    if let Some(ref mw) = middleware_path {
-        println!("  Middleware library: {}", mw.display());
-    }
-    println!();
-
-    // Preload common dependencies
     preload_dependencies()?;
 
-    // Load the appropriate model type and use it via the trait
-    let mut model: Box<dyn Bmi> = match model_type.as_str() {
-        "c" => Box::new(BmiC::load("bmi_c_model", &library_path, registration_func)?),
-        "fortran" => {
-            if let Some(ref mw_path) = middleware_path {
-                Box::new(BmiFortran::load(
-                    "bmi_fortran_model",
-                    &library_path,
-                    mw_path,
-                    registration_func,
-                )?)
-            } else {
-                Box::new(BmiFortran::load_single_library(
-                    "bmi_fortran_model",
-                    &library_path,
-                    registration_func,
-                )?)
+    // Create runner from config
+    let mut runner = ModelRunner::from_config(
+        "/home/josh/code/JoshCu/hf_resample/output/time_test/config/realization.json",
+    )?;
+
+    // Optionally set custom middleware path
+    // runner.set_fortran_middleware("libiso_c_bmi.so");
+
+    // Get all locations from forcings
+    // (you'd need to initialize forcings first to get this, or know them ahead of time)
+    let locations = vec!["cat-2863621"];
+
+    for location in locations {
+        println!("=== Processing {} ===", location);
+
+        // Initialize for this location
+        runner.initialize(location)?;
+
+        println!("Models loaded: {}", runner.model_count());
+        println!("Total timesteps: {}", runner.total_steps());
+
+        // Run all timesteps
+        let mut outputs: Vec<f64> = Vec::new();
+        let main_var = runner.get_main_output_name()?;
+
+        while runner.has_more_steps() {
+            runner.update()?;
+
+            // Get main output
+            let q_out = runner.get_main_output()?;
+
+            outputs.push(q_out);
+
+            // Or get all configured outputs
+            let all_outputs = runner.get_outputs()?;
+
+            if runner.current_step() % 1 == 0 {
+                println!(
+                    "Step {}: {} = {:.9}",
+                    runner.current_step(),
+                    main_var,
+                    q_out
+                );
             }
         }
-        _ => {
-            eprintln!("Unknown model type: {}. Use 'c' or 'fortran'.", model_type);
-            std::process::exit(1);
-        }
-    };
 
-    println!("✓ Model loaded successfully");
+        println!("Completed {} timesteps", outputs.len());
 
-    // Initialize
-    model.initialize(config_file.to_str().unwrap())?;
-    println!("✓ Model initialized");
-    println!();
-
-    // Print model information
-    print_model_info(model.as_ref())?;
-
-    // Run the model
-    run_model(model.as_mut())?;
-
-    // Finalize
-    model.finalize()?;
-    println!("✓ Model finalized");
+        // Finalize before processing next location
+        runner.finalize()?;
+    }
 
     Ok(())
 }
