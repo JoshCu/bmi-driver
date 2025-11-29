@@ -13,14 +13,22 @@ use std::process::{Child, Command};
 fn main() -> Result<(), BmiError> {
     let args: Vec<String> = std::env::args().collect();
 
+    // Child process: run multiple locations serially
     if args.len() >= 2 {
-        return run_single_location(&args[1]);
+        preload_dependencies()?;
+        for location in &args[1..] {
+            if let Err(e) = run_single_location(location) {
+                eprintln!("Error processing {}: {:?}", location, e);
+            }
+        }
+        return Ok(());
     }
 
+    // Parent process
     preload_dependencies()?;
 
     let db_path = PathBuf::from(
-        "/home/josh/code/JoshCu/hf_resample/output/speed_test/config/speed_test_subset.gpkg",
+        "/home/josh/code/JoshCu/hf_resample/output/cost_test/config/cost_test_subset.gpkg",
     );
     let conn = rusqlite::Connection::open(&db_path).unwrap();
     let mut stmt = conn.prepare("SELECT divide_id FROM 'divides'").unwrap();
@@ -29,36 +37,20 @@ fn main() -> Result<(), BmiError> {
         .unwrap();
     let locations: Vec<String> = rows.flatten().collect();
 
-    let max_parallel = 32;
+    let num_processes = 32;
+    let chunk_size = (locations.len() + num_processes - 1) / num_processes;
+
     let mut handles: Vec<Child> = Vec::new();
 
-    for location in locations {
-        // Wait if we have too many running
-        while handles.len() >= max_parallel {
-            // Find and remove one finished process
-            let mut finished_idx = None;
-            for (i, h) in handles.iter_mut().enumerate() {
-                if h.try_wait().ok().flatten().is_some() {
-                    finished_idx = Some(i);
-                    break;
-                }
-            }
-
-            if let Some(idx) = finished_idx {
-                handles.remove(idx);
-            } else {
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
-        }
-
+    for chunk in locations.chunks(chunk_size) {
         let child = Command::new(&args[0])
-            .arg(&location)
+            .args(chunk)
             .spawn()
             .expect("Failed to spawn");
         handles.push(child);
     }
 
-    // Wait for remaining
+    // Wait for all
     for mut h in handles {
         h.wait().ok();
     }
@@ -67,10 +59,8 @@ fn main() -> Result<(), BmiError> {
 }
 
 fn run_single_location(location: &str) -> Result<(), BmiError> {
-    preload_dependencies()?;
-
     let mut runner = ModelRunner::from_config(
-        "/home/josh/code/JoshCu/hf_resample/output/speed_test/config/realization.json",
+        "/home/josh/code/JoshCu/hf_resample/output/cost_test/config/realization.json",
     )?;
 
     runner.initialize(location)?;
@@ -80,8 +70,7 @@ fn run_single_location(location: &str) -> Result<(), BmiError> {
 
     // Get results
     let outputs = runner.get_main_outputs()?;
-    println!("Completed {} timesteps for {}", outputs.len(), location);
-
+    // println!("Completed {} timesteps for {}", outputs.len(), location);
     runner.finalize()?;
     Ok(())
 }
