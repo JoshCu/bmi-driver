@@ -23,7 +23,8 @@ use crate::bmi_ffi::{
 };
 use crate::error::{BmiError, BmiResult};
 use crate::library::GlobalLibrary;
-use crate::traits::Bmi;
+use crate::traits::{Bmi, VarType};
+use std::collections::HashMap;
 
 // Function pointer types for Fortran BMI functions
 // The handle is passed as `void*` in the C declaration, but the C++ code passes `&handle`
@@ -123,6 +124,8 @@ pub struct BmiFortran {
     handle: *mut c_void,
     initialized: bool,
     time_convert_factor: f64,
+    /// Cache of variable types for auto-typing
+    var_type_cache: Option<HashMap<String, VarType>>,
 }
 
 // Helper macro to load a function with explicit type annotation
@@ -216,6 +219,7 @@ impl BmiFortran {
             handle,
             initialized: false,
             time_convert_factor: 1.0,
+            var_type_cache: None,
         })
     }
 
@@ -280,6 +284,7 @@ impl BmiFortran {
             handle,
             initialized: false,
             time_convert_factor: 1.0,
+            var_type_cache: None,
         })
     }
 
@@ -416,6 +421,9 @@ impl Bmi for BmiFortran {
 
         self.initialized = true;
         self.time_convert_factor = self.calculate_time_convert_factor();
+
+        // Cache variable types for auto-typing
+        self.cache_var_types()?;
 
         Ok(())
     }
@@ -1063,6 +1071,14 @@ impl Bmi for BmiFortran {
         }
 
         Ok(origin)
+    }
+
+    fn get_var_type_cache(&self) -> Option<&HashMap<String, VarType>> {
+        self.var_type_cache.as_ref()
+    }
+
+    fn get_var_type_cache_mut(&mut self) -> &mut Option<HashMap<String, VarType>> {
+        &mut self.var_type_cache
     }
 }
 

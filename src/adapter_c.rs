@@ -3,18 +3,18 @@
 //! This module provides a safe wrapper for BMI models that use the C interface
 //! (function pointer struct with registration function).
 
+use std::collections::HashMap;
 use std::ffi::{CStr, CString};
-use std::os::raw::{c_char, c_int, c_void};
+use std::os::raw::{c_char, c_void};
 use std::path::Path;
-use std::ptr;
 
 use crate::bmi_ffi::{
     Bmi as BmiStruct, BmiRegistrationFn, BMI_MAX_COMPONENT_NAME, BMI_MAX_LOCATION_NAME,
     BMI_MAX_TYPE_NAME, BMI_MAX_UNITS_NAME, BMI_MAX_VAR_NAME, BMI_SUCCESS,
 };
 use crate::error::{BmiError, BmiResult};
-use crate::library::{GlobalLibrary, RTLD_FLAGS};
-use crate::traits::Bmi;
+use crate::library::GlobalLibrary;
+use crate::traits::{Bmi, VarType};
 
 /// A safe wrapper around a BMI C model loaded from a shared library.
 ///
@@ -26,6 +26,8 @@ pub struct BmiC {
     bmi: Box<BmiStruct>,
     initialized: bool,
     time_convert_factor: f64,
+    /// Cache of variable types for auto-typing
+    var_type_cache: Option<HashMap<String, VarType>>,
 }
 
 impl BmiC {
@@ -44,12 +46,11 @@ impl BmiC {
         let model_name = model_name.into();
         let library_path = library_path.as_ref();
 
-        let library = unsafe { GlobalLibrary::new(library_path) }.map_err(|e| {
-            BmiError::LibraryLoad {
+        let library =
+            unsafe { GlobalLibrary::new(library_path) }.map_err(|e| BmiError::LibraryLoad {
                 path: library_path.display().to_string(),
                 source: e,
-            }
-        })?;
+            })?;
 
         let register_fn: BmiRegistrationFn =
             unsafe { library.get_fn(registration_func) }.map_err(|e| {
@@ -70,6 +71,7 @@ impl BmiC {
             bmi,
             initialized: false,
             time_convert_factor: 1.0,
+            var_type_cache: None,
         })
     }
 
@@ -368,6 +370,9 @@ impl Bmi for BmiC {
         self.initialized = true;
         self.time_convert_factor = self.calculate_time_convert_factor();
 
+        // Cache variable types for auto-typing
+        self.cache_var_types()?;
+
         Ok(())
     }
 
@@ -489,12 +494,22 @@ impl Bmi for BmiC {
 
     fn get_var_type(&self, name: &str) -> BmiResult<String> {
         self.require_initialized()?;
-        self.get_string_for_var("get_var_type", self.bmi.get_var_type, name, BMI_MAX_TYPE_NAME)
+        self.get_string_for_var(
+            "get_var_type",
+            self.bmi.get_var_type,
+            name,
+            BMI_MAX_TYPE_NAME,
+        )
     }
 
     fn get_var_units(&self, name: &str) -> BmiResult<String> {
         self.require_initialized()?;
-        self.get_string_for_var("get_var_units", self.bmi.get_var_units, name, BMI_MAX_UNITS_NAME)
+        self.get_string_for_var(
+            "get_var_units",
+            self.bmi.get_var_units,
+            name,
+            BMI_MAX_UNITS_NAME,
+        )
     }
 
     fn get_var_itemsize(&self, name: &str) -> BmiResult<i32> {
@@ -534,7 +549,11 @@ impl Bmi for BmiC {
 
     fn get_time_units(&self) -> BmiResult<String> {
         self.require_initialized()?;
-        self.get_string_field("get_time_units", self.bmi.get_time_units, BMI_MAX_UNITS_NAME)
+        self.get_string_field(
+            "get_time_units",
+            self.bmi.get_time_units,
+            BMI_MAX_UNITS_NAME,
+        )
     }
 
     fn get_time_step(&self) -> BmiResult<f64> {
@@ -659,12 +678,13 @@ impl Bmi for BmiC {
     fn get_value_at_indices_f64(&self, name: &str, indices: &[i32]) -> BmiResult<Vec<f64>> {
         self.require_initialized()?;
 
-        let func = self.bmi.get_value_at_indices.ok_or_else(|| {
-            BmiError::FunctionNotImplemented {
-                model: self.model_name.clone(),
-                func: "get_value_at_indices".to_string(),
-            }
-        })?;
+        let func =
+            self.bmi
+                .get_value_at_indices
+                .ok_or_else(|| BmiError::FunctionNotImplemented {
+                    model: self.model_name.clone(),
+                    func: "get_value_at_indices".to_string(),
+                })?;
 
         let name_cstr = CString::new(name).map_err(|_| BmiError::InvalidUtf8)?;
         let mut values = vec![0.0f64; indices.len()];
@@ -787,12 +807,13 @@ impl Bmi for BmiC {
     ) -> BmiResult<()> {
         self.require_initialized()?;
 
-        let func = self.bmi.set_value_at_indices.ok_or_else(|| {
-            BmiError::FunctionNotImplemented {
-                model: self.model_name.clone(),
-                func: "set_value_at_indices".to_string(),
-            }
-        })?;
+        let func =
+            self.bmi
+                .set_value_at_indices
+                .ok_or_else(|| BmiError::FunctionNotImplemented {
+                    model: self.model_name.clone(),
+                    func: "set_value_at_indices".to_string(),
+                })?;
 
         let name_cstr = CString::new(name).map_err(|_| BmiError::InvalidUtf8)?;
         let result = unsafe {
@@ -946,6 +967,14 @@ impl Bmi for BmiC {
         }
 
         Ok(values)
+    }
+
+    fn get_var_type_cache(&self) -> Option<&HashMap<String, VarType>> {
+        self.var_type_cache.as_ref()
+    }
+
+    fn get_var_type_cache_mut(&mut self) -> &mut Option<HashMap<String, VarType>> {
+        &mut self.var_type_cache
     }
 }
 

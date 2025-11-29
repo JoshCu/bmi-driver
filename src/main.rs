@@ -214,14 +214,14 @@ fn run_model(model: &mut dyn Bmi) -> Result<(), BmiError> {
     let first_output = output_vars.first().cloned();
 
     while model.get_current_time()? < end_time {
-        model.set_value_f32("PRCPNONC", &[precip_rate[step]])?;
-        model.set_value_f32("Q2", &[SPFH_2maboveground[step]])?;
-        model.set_value_f32("SFCTMP", &[TMP_2maboveground[step]])?;
-        model.set_value_f32("UU", &[UGRD_10maboveground[step]])?;
-        model.set_value_f32("VV", &[VGRD_10maboveground[step]])?;
-        model.set_value_f32("LWDN", &[DLWRF_surface[step]])?;
-        model.set_value_f32("SOLDN", &[DSWRF_surface[step]])?;
-        model.set_value_f32("SFCPRS", &[PRES_surface[step]])?;
+        model.set_value("PRCPNONC", &[precip_rate[step]])?;
+        model.set_value("Q2", &[SPFH_2maboveground[step]])?;
+        model.set_value("SFCTMP", &[TMP_2maboveground[step]])?;
+        model.set_value("UU", &[UGRD_10maboveground[step]])?;
+        model.set_value("VV", &[VGRD_10maboveground[step]])?;
+        model.set_value("LWDN", &[DLWRF_surface[step]])?;
+        model.set_value("SOLDN", &[DSWRF_surface[step]])?;
+        model.set_value("SFCPRS", &[PRES_surface[step]])?;
         model.update()?;
         step += 1;
 
@@ -229,24 +229,15 @@ fn run_model(model: &mut dyn Bmi) -> Result<(), BmiError> {
 
         // Print progress every 10 steps or at the end
         if step % 1 == 0 || current_time >= end_time {
-            print!("Step {}: time = {:.2}", step, current_time);
+            println!("Step {}: time = {:.2}", step, current_time);
 
             // Try to print the first output variable's value
             if let Some(ref var_name) = first_output {
                 // Try f64 first
-                if let Ok(values) = model.get_value_f32(var_name) {
-                    if !values.is_empty() {
-                        if values.len() == 1 {
-                            print!(", {} = {:.10}", var_name, values[0]);
-                        } else {
-                            print!(", {} = [{:.10}, ...]", var_name, values[0]);
-                        }
-                    }
+                if let Ok(values) = model.get_value_scalar(var_name) {
+                    println!("QINSUR = {:9}", values);
                 }
-                // Could also try f32 or i32 if f64 fails
             }
-
-            println!();
         }
     }
 

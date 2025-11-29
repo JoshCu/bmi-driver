@@ -98,7 +98,7 @@ pub use adapter_c::BmiC;
 pub use adapter_fortran::BmiFortran;
 pub use error::{BmiError, BmiResult};
 pub use library::preload_dependencies;
-pub use traits::{Bmi, BmiExt};
+pub use traits::{Bmi, BmiExt, BmiValue, VarType};
 
 // For backwards compatibility, also export BmiC as BmiModel
 pub type BmiModel = BmiC;
