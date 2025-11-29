@@ -1,262 +1,249 @@
-//! Forcings trait and types for reading forcing data.
-//!
-//! This module provides an interface similar to BMI but focused on
-//! reading time-series forcing data (e.g., from NetCDF files).
-
-use crate::error::{BmiError, BmiResult};
-use crate::traits::{BmiValue, VarType};
 use std::collections::HashMap;
+use std::path::Path;
+use netcdf::{self, File as NetCdfFile};
+use crate::error::{BmiError, BmiResult};
+use crate::traits::VarType;
 
-/// Information about a forcing variable.
-#[derive(Debug, Clone)]
-pub struct ForcingVarInfo {
-    /// Variable name
-    pub name: String,
-    /// Units string
-    pub units: String,
-    /// Data type
-    pub var_type: VarType,
-    /// Size of one element in bytes
-    pub itemsize: i32,
-    /// Total size in bytes (itemsize * count)
-    pub nbytes: i32,
-}
-
-/// Common interface for forcing data providers.
-///
-/// This trait is similar to BMI but focused on reading forcing data
-/// rather than running a model. It provides:
-/// - Time-series data access
-/// - Variable metadata
-/// - Support for multiple locations (catchments)
 pub trait Forcings {
-    /// Get the name/identifier of this forcing provider.
     fn name(&self) -> &str;
-
-    /// Check if the forcing provider has been initialized.
     fn is_initialized(&self) -> bool;
-
-    /// Initialize the forcing provider.
-    ///
-    /// For file-based providers, this opens the file and reads metadata.
-    /// The `config` parameter is provider-specific (e.g., file path).
-    fn initialize(&mut self, config: &str) -> BmiResult<()>;
-
-    /// Finalize and clean up resources.
+    fn initialize(&mut self, path: &str) -> BmiResult<()>;
     fn finalize(&mut self) -> BmiResult<()>;
 
-    /// Get the component/source name of the forcing data.
-    fn get_component_name(&self) -> BmiResult<String>;
+    fn var_names(&self) -> BmiResult<Vec<String>>;
+    fn var_type(&self, name: &str) -> BmiResult<String>;
+    fn var_units(&self, name: &str) -> BmiResult<String>;
+    fn var_itemsize(&self, name: &str) -> BmiResult<i32>;
 
-    // =========================================================================
-    // Variable Information
-    // =========================================================================
+    fn start_time(&self) -> BmiResult<f64>;
+    fn end_time(&self) -> BmiResult<f64>;
+    fn time_step(&self) -> BmiResult<f64>;
+    fn timestep_count(&self) -> BmiResult<usize>;
 
-    /// Get the number of output (forcing) variables.
-    fn get_output_item_count(&self) -> BmiResult<i32>;
+    fn location_ids(&self) -> BmiResult<Vec<String>>;
+    fn location_index(&self, id: &str) -> BmiResult<usize>;
 
-    /// Get the names of all output variables.
-    fn get_output_var_names(&self) -> BmiResult<Vec<String>>;
-
-    /// Get the data type of a variable as a string.
-    fn get_var_type(&self, name: &str) -> BmiResult<String>;
-
-    /// Get the units of a variable.
-    fn get_var_units(&self, name: &str) -> BmiResult<String>;
-
-    /// Get the size in bytes of one element of a variable.
-    fn get_var_itemsize(&self, name: &str) -> BmiResult<i32>;
-
-    /// Get the total size in bytes of a variable (for one timestep, one location).
-    fn get_var_nbytes(&self, name: &str) -> BmiResult<i32>;
-
-    // =========================================================================
-    // Time Information
-    // =========================================================================
-
-    /// Get the start time (first timestep) in the forcing data.
-    fn get_start_time(&self) -> BmiResult<f64>;
-
-    /// Get the end time (last timestep) in the forcing data.
-    fn get_end_time(&self) -> BmiResult<f64>;
-
-    /// Get the time units (e.g., "s", "seconds since epoch").
-    fn get_time_units(&self) -> BmiResult<String>;
-
-    /// Get the time step size.
-    fn get_time_step(&self) -> BmiResult<f64>;
-
-    /// Get the total number of timesteps.
-    fn get_timestep_count(&self) -> BmiResult<usize>;
-
-    // =========================================================================
-    // Location/Catchment Information
-    // =========================================================================
-
-    /// Get the list of location/catchment IDs.
-    fn get_location_ids(&self) -> BmiResult<Vec<String>>;
-
-    /// Get the number of locations/catchments.
-    fn get_location_count(&self) -> BmiResult<usize>;
-
-    /// Get the index for a location ID.
-    fn get_location_index(&self, id: &str) -> BmiResult<usize>;
-
-    // =========================================================================
-    // Value Getters
-    // =========================================================================
-
-    /// Get all values for a variable at a specific location (all timesteps).
-    fn get_value_f64(&self, name: &str, location_id: &str) -> BmiResult<Vec<f64>>;
-
-    /// Get all values for a variable at a specific location (all timesteps).
-    fn get_value_f32(&self, name: &str, location_id: &str) -> BmiResult<Vec<f32>>;
-
-    /// Get all values for a variable at a specific location (all timesteps).
-    fn get_value_i32(&self, name: &str, location_id: &str) -> BmiResult<Vec<i32>>;
-
-    /// Get a single value for a variable at a specific location and timestep.
-    fn get_value_at_index_f64(
-        &self,
-        name: &str,
-        location_id: &str,
-        time_index: usize,
-    ) -> BmiResult<f64>;
-
-    /// Get a single value for a variable at a specific location and timestep.
-    fn get_value_at_index_f32(
-        &self,
-        name: &str,
-        location_id: &str,
-        time_index: usize,
-    ) -> BmiResult<f32>;
-
-    /// Get values for a range of timesteps.
-    fn get_value_range_f64(
-        &self,
-        name: &str,
-        location_id: &str,
-        start_index: usize,
-        end_index: usize,
-    ) -> BmiResult<Vec<f64>>;
-
-    /// Get values for a range of timesteps.
-    fn get_value_range_f32(
-        &self,
-        name: &str,
-        location_id: &str,
-        start_index: usize,
-        end_index: usize,
-    ) -> BmiResult<Vec<f32>>;
-
-    // =========================================================================
-    // Variable Type Cache
-    // =========================================================================
-
-    /// Get the cached variable types.
-    fn get_var_type_cache(&self) -> Option<&HashMap<String, VarType>>;
-
-    /// Get the cached type for a variable.
-    fn get_cached_var_type(&self, name: &str) -> Option<VarType> {
-        self.get_var_type_cache()
-            .and_then(|cache| cache.get(name).cloned())
-    }
+    fn get_f32(&self, name: &str, loc: &str, step: usize) -> BmiResult<f32>;
+    fn get_f64(&self, name: &str, loc: &str, step: usize) -> BmiResult<f64>;
 }
 
-/// Extension trait providing convenience methods for Forcings.
-pub trait ForcingsExt: Forcings {
-    /// Get variable value with automatic type handling.
-    fn get_value(&self, name: &str, location_id: &str) -> BmiResult<BmiValue> {
-        let var_type = if let Some(vt) = self.get_cached_var_type(name) {
-            vt
-        } else {
-            let type_str = self.get_var_type(name)?;
-            let item_size = self.get_var_itemsize(name)?;
-            VarType::from_bmi_type(&type_str, item_size)
-        };
+#[derive(Debug, Clone)]
+struct VarInfo {
+    units: String,
+    var_type: VarType,
+    itemsize: i32,
+    type_str: String,
+}
 
-        match var_type {
-            VarType::Float => Ok(BmiValue::Float(self.get_value_f32(name, location_id)?)),
-            VarType::Double => Ok(BmiValue::Double(self.get_value_f64(name, location_id)?)),
-            VarType::Int => Ok(BmiValue::Int(self.get_value_i32(name, location_id)?)),
-            VarType::Unknown(t) => Err(BmiError::BmiFunctionFailed {
-                model: self.name().to_string(),
-                func: format!("get_value: unknown type '{}'", t),
-            }),
+pub struct NetCdfForcings {
+    name: String,
+    file: Option<NetCdfFile>,
+    initialized: bool,
+    location_ids: Vec<String>,
+    location_index: HashMap<String, usize>,
+    var_names: Vec<String>,
+    var_info: HashMap<String, VarInfo>,
+    timestep_count: usize,
+    time_step: f64,
+    start_time: f64,
+    end_time: f64,
+    cached_loc: Option<String>,
+    cached_data: HashMap<String, Vec<f32>>,
+}
+
+impl NetCdfForcings {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            file: None,
+            initialized: false,
+            location_ids: Vec::new(),
+            location_index: HashMap::new(),
+            var_names: Vec::new(),
+            var_info: HashMap::new(),
+            timestep_count: 0,
+            time_step: 0.0,
+            start_time: 0.0,
+            end_time: 0.0,
+            cached_loc: None,
+            cached_data: HashMap::new(),
         }
     }
 
-    /// Get a single value at a timestep with automatic type handling.
-    fn get_value_at_index(
-        &self,
-        name: &str,
-        location_id: &str,
-        time_index: usize,
-    ) -> BmiResult<f64> {
-        let var_type = if let Some(vt) = self.get_cached_var_type(name) {
-            vt
-        } else {
-            let type_str = self.get_var_type(name)?;
-            let item_size = self.get_var_itemsize(name)?;
-            VarType::from_bmi_type(&type_str, item_size)
-        };
+    pub fn preload_location(&mut self, loc_id: &str) -> BmiResult<()> {
+        if self.cached_loc.as_deref() == Some(loc_id) { return Ok(()); }
 
-        match var_type {
-            VarType::Float => {
-                Ok(self.get_value_at_index_f32(name, location_id, time_index)? as f64)
+        let loc_idx = self.loc_idx(loc_id)?;
+        let file = self.file.as_ref().ok_or_else(|| self.err("not initialized"))?;
+
+        self.cached_data.clear();
+        for var_name in &self.var_names {
+            let var = file.variable(var_name).ok_or_else(|| self.err(&format!("Variable '{}' not found", var_name)))?;
+            let values: Vec<f32> = var.get_values((loc_idx, ..))
+                .map_err(|e| self.err(&format!("Failed to read '{}': {}", var_name, e)))?;
+            self.cached_data.insert(var_name.clone(), values);
+        }
+
+        self.cached_loc = Some(loc_id.to_string());
+        Ok(())
+    }
+
+    fn err(&self, msg: &str) -> BmiError {
+        BmiError::FunctionFailed { model: self.name.clone(), func: msg.into() }
+    }
+
+    fn loc_idx(&self, id: &str) -> BmiResult<usize> {
+        self.location_index.get(id).copied()
+            .ok_or_else(|| self.err(&format!("Unknown location: '{}'", id)))
+    }
+
+    fn load_metadata(&mut self) -> BmiResult<()> {
+        let file = self.file.as_ref().ok_or_else(|| self.err("not initialized"))?;
+
+        let ids_var = file.variable("ids").ok_or_else(|| self.err("Missing 'ids' variable"))?;
+        self.location_ids.clear();
+        self.location_index.clear();
+
+        for i in 0..ids_var.len() {
+            let id = ids_var.get_string(i).map_err(|e| self.err(&format!("Failed to get id {}: {}", i, e)))?;
+            self.location_index.insert(id.clone(), i);
+            self.location_ids.push(id);
+        }
+
+        self.timestep_count = file.dimension("time").map(|d| d.len()).ok_or_else(|| self.err("Missing 'time' dimension"))?;
+
+        self.load_time_info()?;
+        self.discover_vars()?;
+        Ok(())
+    }
+
+    fn load_time_info(&mut self) -> BmiResult<()> {
+        let file = self.file.as_ref().ok_or_else(|| self.err("not initialized"))?;
+
+        if let Some(time_var) = file.variable("Time") {
+            let dims = time_var.dimensions();
+            let times: Vec<i64> = if dims.len() == 2 {
+                time_var.get_values((0usize, ..)).map_err(|e| self.err(&format!("Time read error: {}", e)))?
+            } else {
+                time_var.get_values(..).map_err(|e| self.err(&format!("Time read error: {}", e)))?
+            };
+
+            if !times.is_empty() {
+                self.start_time = times[0] as f64;
+                self.end_time = *times.last().unwrap() as f64;
+                if times.len() > 1 { self.time_step = (times[1] - times[0]) as f64; }
             }
-            VarType::Double => self.get_value_at_index_f64(name, location_id, time_index),
-            VarType::Int => Err(BmiError::BmiFunctionFailed {
-                model: self.name().to_string(),
-                func: "get_value_at_index: integer type not supported for scalar".to_string(),
-            }),
-            VarType::Unknown(t) => Err(BmiError::BmiFunctionFailed {
-                model: self.name().to_string(),
-                func: format!("get_value_at_index: unknown type '{}'", t),
-            }),
+        } else {
+            self.start_time = 0.0;
+            self.time_step = 3600.0;
+            self.end_time = self.start_time + (self.timestep_count as f64 - 1.0) * self.time_step;
         }
+        Ok(())
     }
 
-    /// Get parsed variable type.
-    fn get_var_type_parsed(&self, name: &str) -> BmiResult<VarType> {
-        if let Some(vt) = self.get_cached_var_type(name) {
-            return Ok(vt);
+    fn discover_vars(&mut self) -> BmiResult<()> {
+        let file = self.file.as_ref().ok_or_else(|| self.err("not initialized"))?;
+        let exclude = ["ids", "Time"];
+
+        self.var_names.clear();
+        self.var_info.clear();
+
+        for var in file.variables() {
+            let name = var.name();
+            if exclude.contains(&name.as_str()) { continue; }
+
+            let dims: Vec<String> = var.dimensions().iter().map(|d| d.name()).collect();
+            if !dims.contains(&"catchment-id".to_string()) || !dims.contains(&"time".to_string()) { continue; }
+
+            let units = var.attribute("units")
+                .and_then(|a| a.value().ok())
+                .map(|v| match v { netcdf::AttributeValue::Str(s) => s, _ => String::new() })
+                .unwrap_or_default();
+
+            let (type_str, itemsize, var_type) = Self::type_info(&var);
+            self.var_names.push(name.clone());
+            self.var_info.insert(name, VarInfo { units, var_type, itemsize, type_str });
         }
-        let type_str = self.get_var_type(name)?;
-        let item_size = self.get_var_itemsize(name)?;
-        Ok(VarType::from_bmi_type(&type_str, item_size))
+        Ok(())
     }
 
-    /// Check if a variable exists.
-    fn has_variable(&self, name: &str) -> BmiResult<bool> {
-        let names = self.get_output_var_names()?;
-        Ok(names.iter().any(|n| n == name))
-    }
-
-    /// Get info about all variables.
-    fn get_all_var_info(&self) -> BmiResult<Vec<ForcingVarInfo>> {
-        let names = self.get_output_var_names()?;
-        let mut infos = Vec::with_capacity(names.len());
-
-        for name in names {
-            let units = self.get_var_units(&name)?;
-            let type_str = self.get_var_type(&name)?;
-            let itemsize = self.get_var_itemsize(&name)?;
-            let nbytes = self.get_var_nbytes(&name)?;
-            let var_type = VarType::from_bmi_type(&type_str, itemsize);
-
-            infos.push(ForcingVarInfo {
-                name,
-                units,
-                var_type,
-                itemsize,
-                nbytes,
-            });
+    fn type_info(var: &netcdf::Variable) -> (String, i32, VarType) {
+        use netcdf::types::{FloatType, IntType, NcVariableType};
+        match var.vartype() {
+            NcVariableType::Float(FloatType::F32) => ("float".into(), 4, VarType::Float),
+            NcVariableType::Float(FloatType::F64) => ("double".into(), 8, VarType::Double),
+            NcVariableType::Int(IntType::I32) => ("int".into(), 4, VarType::Int),
+            _ => ("float".into(), 4, VarType::Float),
         }
-
-        Ok(infos)
     }
 }
 
-// Blanket implementation
-impl<T: Forcings + ?Sized> ForcingsExt for T {}
+impl Forcings for NetCdfForcings {
+    fn name(&self) -> &str { &self.name }
+    fn is_initialized(&self) -> bool { self.initialized }
+
+    fn initialize(&mut self, path: &str) -> BmiResult<()> {
+        if self.initialized { return Err(BmiError::AlreadyInitialized { model: self.name.clone() }); }
+        if !Path::new(path).exists() { return Err(BmiError::ConfigNotFound { path: path.into() }); }
+
+        self.file = Some(netcdf::open(path).map_err(|e| self.err(&format!("Failed to open: {}", e)))?);
+        self.load_metadata()?;
+        self.initialized = true;
+        Ok(())
+    }
+
+    fn finalize(&mut self) -> BmiResult<()> {
+        self.file = None;
+        self.initialized = false;
+        self.location_ids.clear();
+        self.location_index.clear();
+        self.var_names.clear();
+        self.var_info.clear();
+        self.cached_loc = None;
+        self.cached_data.clear();
+        Ok(())
+    }
+
+    fn var_names(&self) -> BmiResult<Vec<String>> { Ok(self.var_names.clone()) }
+
+    fn var_type(&self, name: &str) -> BmiResult<String> {
+        self.var_info.get(name).map(|i| i.type_str.clone()).ok_or_else(|| self.err(&format!("Unknown var: {}", name)))
+    }
+
+    fn var_units(&self, name: &str) -> BmiResult<String> {
+        self.var_info.get(name).map(|i| i.units.clone()).ok_or_else(|| self.err(&format!("Unknown var: {}", name)))
+    }
+
+    fn var_itemsize(&self, name: &str) -> BmiResult<i32> {
+        self.var_info.get(name).map(|i| i.itemsize).ok_or_else(|| self.err(&format!("Unknown var: {}", name)))
+    }
+
+    fn start_time(&self) -> BmiResult<f64> { Ok(self.start_time) }
+    fn end_time(&self) -> BmiResult<f64> { Ok(self.end_time) }
+    fn time_step(&self) -> BmiResult<f64> { Ok(self.time_step) }
+    fn timestep_count(&self) -> BmiResult<usize> { Ok(self.timestep_count) }
+
+    fn location_ids(&self) -> BmiResult<Vec<String>> { Ok(self.location_ids.clone()) }
+
+    fn location_index(&self, id: &str) -> BmiResult<usize> { self.loc_idx(id) }
+
+    fn get_f32(&self, name: &str, loc: &str, step: usize) -> BmiResult<f32> {
+        if let Some(data) = self.cached_loc.as_ref().filter(|l| *l == loc).and_then(|_| self.cached_data.get(name)) {
+            return data.get(step).copied().ok_or_else(|| self.err("Index out of bounds"));
+        }
+
+        let loc_idx = self.loc_idx(loc)?;
+        let file = self.file.as_ref().ok_or_else(|| self.err("not initialized"))?;
+        let var = file.variable(name).ok_or_else(|| self.err(&format!("Variable '{}' not found", name)))?;
+        let vals: Vec<f32> = var.get_values((loc_idx, step..step + 1)).map_err(|e| self.err(&format!("Read error: {}", e)))?;
+        vals.into_iter().next().ok_or_else(|| self.err("Empty result"))
+    }
+
+    fn get_f64(&self, name: &str, loc: &str, step: usize) -> BmiResult<f64> {
+        self.get_f32(name, loc, step).map(|v| v as f64)
+    }
+}
+
+impl Drop for NetCdfForcings {
+    fn drop(&mut self) { let _ = self.finalize(); }
+}
