@@ -14,4 +14,5 @@ name = "bmi-example"
 path = "src/main.rs"
 
 [dependencies]
+netcdf = {version = "0.11.1", default-features = false}
 thiserror = "1.0"

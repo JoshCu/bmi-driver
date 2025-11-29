@@ -10,10 +10,16 @@
 //!
 //! Both adapters implement the common `Bmi` trait, allowing them to be used interchangeably.
 //!
+//! ## Forcings
+//!
+//! The crate also provides a `Forcings` trait for reading forcing data, with a NetCDF
+//! implementation (`NetCdfForcings`) for reading from NetCDF files.
+//!
 //! ## Example
 //!
 //! ```no_run
 //! use bmi::{Bmi, BmiExt, BmiC, BmiFortran, preload_dependencies};
+//! use bmi::{Forcings, ForcingsExt, NetCdfForcings};
 //!
 //! fn main() -> Result<(), bmi::BmiError> {
 //!     // Preload dependencies (libm, etc.)
@@ -26,63 +32,33 @@
 //!         "register_bmi",
 //!     )?;
 //!
-//!     // Or load a Fortran BMI model (requires separate middleware library)
-//!     // let mut model = BmiFortran::load(
-//!     //     "my_fortran_model",
-//!     //     "/path/to/libfortran_model.so",
-//!     //     "/path/to/libbmi_fortran.so",  // middleware library
-//!     //     "create_bmi_model",
-//!     // )?;
-//!     //
-//!     // Or if everything is in one library:
-//!     // let mut model = BmiFortran::load_single_library(
-//!     //     "my_fortran_model",
-//!     //     "/path/to/libfortran_model.so",
-//!     //     "create_bmi_model",
-//!     // )?;
-//!
 //!     // Initialize
 //!     model.initialize("/path/to/config.yml")?;
 //!
-//!     // Use the common Bmi trait methods
-//!     println!("Component: {}", model.get_component_name()?);
-//!     println!("Time units: {}", model.get_time_units()?);
+//!     // Load forcing data from NetCDF
+//!     let mut forcings = NetCdfForcings::new("my_forcings");
+//!     forcings.initialize("/path/to/forcings.nc")?;
 //!
-//!     // Get values (type-specific)
-//!     let values = model.get_value_f64("temperature")?;
+//!     // Get forcing variable names
+//!     for name in forcings.get_output_var_names()? {
+//!         println!("Forcing var: {} [{}]", name, forcings.get_var_units(&name)?);
+//!     }
 //!
-//!     // Or use the BmiExt convenience methods
-//!     let scalar = model.get_value_scalar_f64("discharge")?;
-//!
-//!     // Run the model
+//!     // Run the model with forcing data
+//!     let location = "cat-123";
+//!     let mut step = 0;
 //!     while model.get_current_time()? < model.get_end_time()? {
+//!         // Get forcing value at current timestep (auto-typed)
+//!         let temp = forcings.get_value_at_index("TMP_2maboveground", location, step)?;
+//!         model.set_value("SFCTMP", &[temp])?;
+//!
 //!         model.update()?;
+//!         step += 1;
 //!     }
 //!
 //!     model.finalize()?;
+//!     forcings.finalize()?;
 //!     Ok(())
-//! }
-//! ```
-//!
-//! ## Using with Dynamic Dispatch (Box<dyn Bmi>)
-//!
-//! ```no_run
-//! use bmi::{Bmi, BmiC, BmiFortran};
-//!
-//! fn load_model(model_type: &str, lib_path: &str, middleware_path: Option<&str>, reg_func: &str)
-//!     -> Result<Box<dyn Bmi>, bmi::BmiError>
-//! {
-//!     match model_type {
-//!         "c" => Ok(Box::new(BmiC::load("model", lib_path, reg_func)?)),
-//!         "fortran" => {
-//!             if let Some(mw) = middleware_path {
-//!                 Ok(Box::new(BmiFortran::load("model", lib_path, mw, reg_func)?))
-//!             } else {
-//!                 Ok(Box::new(BmiFortran::load_single_library("model", lib_path, reg_func)?))
-//!             }
-//!         }
-//!         _ => panic!("Unknown model type"),
-//!     }
 //! }
 //! ```
 
@@ -90,6 +66,8 @@ mod adapter_c;
 mod adapter_fortran;
 mod bmi_ffi;
 mod error;
+mod forcings;
+mod forcings_netcdf;
 mod library;
 mod traits;
 
@@ -97,6 +75,8 @@ mod traits;
 pub use adapter_c::BmiC;
 pub use adapter_fortran::BmiFortran;
 pub use error::{BmiError, BmiResult};
+pub use forcings::{ForcingVarInfo, Forcings, ForcingsExt};
+pub use forcings_netcdf::{NetCdfForcings, NetCdfForcingsConfig};
 pub use library::preload_dependencies;
 pub use traits::{Bmi, BmiExt, BmiValue, VarType};
 
