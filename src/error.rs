@@ -1,5 +1,6 @@
 //! Error types for BMI operations.
 
+use crate::library::DlError;
 use thiserror::Error;
 
 /// Errors that can occur when working with BMI models.
@@ -10,15 +11,15 @@ pub enum BmiError {
     LibraryLoad {
         path: String,
         #[source]
-        source: libloading::Error,
+        source: DlError,
     },
 
     /// Failed to find the registration function in the library
-    #[error("Failed to find registration function '{func}' in library: {source}")]
+    #[error("Failed to find function '{func}' in library: {source}")]
     RegistrationFunctionNotFound {
         func: String,
         #[source]
-        source: libloading::Error,
+        source: DlError,
     },
 
     /// A BMI function returned a failure code
