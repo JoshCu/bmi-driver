@@ -1,0 +1,18 @@
+[package]
+name = "bmi-rs"
+version = "0.1.0"
+edition = "2021"
+description = "Rust adapter for Basic Model Interface (BMI) C libraries"
+license = "MIT"
+
+[lib]
+name = "bmi"
+path = "src/lib.rs"
+
+[[bin]]
+name = "bmi-example"
+path = "src/main.rs"
+
+[dependencies]
+libloading = "0.8"
+thiserror = "1.0"
