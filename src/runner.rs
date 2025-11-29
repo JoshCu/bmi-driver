@@ -12,9 +12,6 @@ use crate::traits::{Bmi, BmiExt};
 use crate::BmiC;
 use crate::BmiFortran;
 
-/// Path to the Fortran BMI middleware library.
-/// Set this based on your environment.
-
 /// A running model instance with its configuration.
 pub struct ModelInstance {
     /// The model name/type
@@ -39,14 +36,18 @@ pub struct ModelRunner {
     available_vars: HashMap<String, VarSource>,
     /// Model instances in dependency order
     models: Vec<ModelInstance>,
-    /// Current timestep index
-    current_step: usize,
     /// Total number of timesteps
     total_steps: usize,
     /// Current location ID
     location_id: String,
     /// Path to Fortran middleware
     fortran_middleware_path: Option<String>,
+    /// Cached model outputs: var_name -> Vec<f64> (one value per timestep)
+    model_outputs: HashMap<String, Vec<f64>>,
+    /// Final outputs (from last model in chain)
+    final_outputs: Vec<f64>,
+    /// Whether run() has been called
+    has_run: bool,
 }
 
 /// Source of a variable value.
@@ -72,10 +73,12 @@ impl ModelRunner {
             forcings: NetCdfForcings::new("forcings"),
             available_vars: HashMap::new(),
             models: Vec::new(),
-            current_step: 0,
             total_steps: 0,
             location_id: String::new(),
             fortran_middleware_path: None,
+            model_outputs: HashMap::new(),
+            final_outputs: Vec::new(),
+            has_run: false,
         })
     }
 
@@ -90,6 +93,9 @@ impl ModelRunner {
 
         // Initialize forcings
         self.forcings.initialize(&self.config.global.forcing.path)?;
+
+        // Preload all forcing data for this location (batched I/O)
+        self.forcings.preload_location(location_id)?;
 
         // Register forcing variables as available
         for var_name in self.forcings.get_output_var_names()? {
@@ -267,27 +273,50 @@ impl ModelRunner {
         Ok(())
     }
 
-    /// Run a single timestep for all models.
-    pub fn update(&mut self) -> BmiResult<()> {
-        if self.current_step >= self.total_steps {
+    /// Run all timesteps for all models sequentially.
+    /// Each model runs through all timesteps before moving to the next model.
+    pub fn run(&mut self) -> BmiResult<()> {
+        if self.has_run {
             return Err(BmiError::BmiFunctionFailed {
                 model: "runner".to_string(),
-                func: "No more timesteps".to_string(),
+                func: "run() has already been called".to_string(),
             });
         }
 
-        // Collect values from forcings and previous models
-        let mut current_values: HashMap<String, f64> = HashMap::new();
-
-        // Run each model in order
+        // Run each model through all timesteps
         for model_idx in 0..self.models.len() {
-            // Get input values for this model
-            let input_map = self.models[model_idx].input_map.clone();
+            self.run_model_all_timesteps(model_idx)?;
+        }
 
+        // Store final outputs from main output variable
+        let main_var = self.get_main_output_name()?;
+        if let Some(outputs) = self.model_outputs.get(&main_var) {
+            self.final_outputs = outputs.clone();
+        }
+
+        self.has_run = true;
+        Ok(())
+    }
+
+    /// Run a single model through all timesteps.
+    fn run_model_all_timesteps(&mut self, model_idx: usize) -> BmiResult<()> {
+        // Collect output var names we need to capture
+        let output_var_names: Vec<String> = self.models[model_idx].model.get_output_var_names()?;
+
+        // Pre-allocate output storage
+        let mut outputs: HashMap<String, Vec<f64>> = output_var_names
+            .iter()
+            .map(|name| (name.clone(), Vec::with_capacity(self.total_steps)))
+            .collect();
+
+        // Get input mapping
+        let input_map = self.models[model_idx].input_map.clone();
+
+        // Run all timesteps
+        for step in 0..self.total_steps {
+            // Set inputs for this timestep
             for (model_input, source_var) in &input_map {
-                let value = self.get_variable_value(&source_var, &current_values)?;
-
-                // Set the value on the model
+                let value = self.get_variable_value_at_step(source_var, step)?;
                 self.models[model_idx]
                     .model
                     .set_value(model_input, &[value])?;
@@ -296,36 +325,39 @@ impl ModelRunner {
             // Update the model
             self.models[model_idx].model.update()?;
 
-            // Collect outputs from this model for use by subsequent models
-            for output_name in self.models[model_idx].model.get_output_var_names()? {
-                if let Ok(value) = self.models[model_idx].model.get_value_scalar(&output_name) {
-                    current_values.insert(output_name, value);
+            // Collect outputs
+            for var_name in &output_var_names {
+                if let Ok(value) = self.models[model_idx].model.get_value_scalar(var_name) {
+                    outputs.get_mut(var_name).unwrap().push(value);
                 }
             }
         }
 
-        self.current_step += 1;
+        // Store outputs for use by subsequent models
+        for (var_name, values) in outputs {
+            self.model_outputs.insert(var_name, values);
+        }
+
         Ok(())
     }
 
-    /// Get a variable value from either forcings or a model output.
-    fn get_variable_value(
-        &self,
-        var_name: &str,
-        current_values: &HashMap<String, f64>,
-    ) -> BmiResult<f64> {
-        // First check if we already have it from a model this timestep
-        if let Some(&value) = current_values.get(var_name) {
-            return Ok(value);
-        }
-
-        // Check the source
+    /// Get a variable value at a specific timestep from forcings or cached model outputs.
+    fn get_variable_value_at_step(&self, var_name: &str, step: usize) -> BmiResult<f64> {
         match self.available_vars.get(var_name) {
             Some(VarSource::Forcing) => self
                 .forcings
-                .get_value_at_index_f32(var_name, &self.location_id, self.current_step)
+                .get_value_at_index_f32(var_name, &self.location_id, step)
                 .map(|v| v as f64),
-            Some(VarSource::Model(idx)) => self.models[*idx].model.get_value_scalar(var_name),
+            Some(VarSource::Model(_)) => {
+                // Get from cached model outputs
+                self.model_outputs
+                    .get(var_name)
+                    .and_then(|v| v.get(step).copied())
+                    .ok_or_else(|| BmiError::BmiFunctionFailed {
+                        model: "runner".to_string(),
+                        func: format!("Model output '{}' not available at step {}", var_name, step),
+                    })
+            }
             None => Err(BmiError::BmiFunctionFailed {
                 model: "runner".to_string(),
                 func: format!("Variable '{}' not available", var_name),
@@ -333,34 +365,9 @@ impl ModelRunner {
         }
     }
 
-    /// Get the current timestep index.
-    pub fn current_step(&self) -> usize {
-        self.current_step
-    }
-
     /// Get the total number of timesteps.
     pub fn total_steps(&self) -> usize {
         self.total_steps
-    }
-
-    /// Check if there are more timesteps to run.
-    pub fn has_more_steps(&self) -> bool {
-        self.current_step < self.total_steps
-    }
-
-    /// Get the value of an output variable at the current timestep.
-    pub fn get_output(&self, var_name: &str) -> BmiResult<f64> {
-        // Find which model provides this variable
-        for model in self.models.iter().rev() {
-            if let Ok(value) = model.model.get_value_scalar(var_name) {
-                return Ok(value);
-            }
-        }
-
-        Err(BmiError::BmiFunctionFailed {
-            model: "runner".to_string(),
-            func: format!("Output variable '{}' not found", var_name),
-        })
     }
 
     /// Get the main output variable name.
@@ -376,23 +383,31 @@ impl ModelRunner {
         Ok(main_var.to_string())
     }
 
-    /// Get the main output variable value.
-    pub fn get_main_output(&self) -> BmiResult<f64> {
-        let main_var = self.get_main_output_name()?;
-        self.get_output(&main_var)
+    /// Get all main output values after run() completes.
+    pub fn get_main_outputs(&self) -> BmiResult<&Vec<f64>> {
+        if !self.has_run {
+            return Err(BmiError::BmiFunctionFailed {
+                model: "runner".to_string(),
+                func: "Must call run() first".to_string(),
+            });
+        }
+        Ok(&self.final_outputs)
     }
 
-    /// Get all requested output variables.
-    pub fn get_outputs(&self) -> BmiResult<HashMap<String, f64>> {
-        let mut outputs = HashMap::new();
-
-        for var_name in self.config.get_output_variables() {
-            if let Ok(value) = self.get_output(var_name) {
-                outputs.insert(var_name.to_string(), value);
-            }
+    /// Get output values for a specific variable after run() completes.
+    pub fn get_output_values(&self, var_name: &str) -> BmiResult<&Vec<f64>> {
+        if !self.has_run {
+            return Err(BmiError::BmiFunctionFailed {
+                model: "runner".to_string(),
+                func: "Must call run() first".to_string(),
+            });
         }
-
-        Ok(outputs)
+        self.model_outputs
+            .get(var_name)
+            .ok_or_else(|| BmiError::BmiFunctionFailed {
+                model: "runner".to_string(),
+                func: format!("Output variable '{}' not found", var_name),
+            })
     }
 
     /// Finalize all models and forcings.
@@ -403,6 +418,8 @@ impl ModelRunner {
         self.forcings.finalize()?;
         self.models.clear();
         self.available_vars.clear();
+        self.model_outputs.clear();
+        self.final_outputs.clear();
         Ok(())
     }
 

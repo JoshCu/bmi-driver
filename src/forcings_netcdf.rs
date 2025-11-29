@@ -39,6 +39,10 @@ pub struct NetCdfForcings {
 
     // Configuration
     config: NetCdfForcingsConfig,
+
+    // Preloaded data cache: var_name -> Vec<f32> (all timesteps for current location)
+    cached_location: Option<String>,
+    cached_data: HashMap<String, Vec<f32>>,
 }
 
 /// Configuration for NetCDF forcing reader.
@@ -99,6 +103,8 @@ impl NetCdfForcings {
             end_time: 0.0,
             time_units: String::new(),
             config,
+            cached_location: None,
+            cached_data: HashMap::new(),
         }
     }
 
@@ -115,6 +121,58 @@ impl NetCdfForcings {
         } else {
             Ok(())
         }
+    }
+
+    /// Preload all forcing variables for a specific location into memory.
+    /// This batches disk I/O for better performance when iterating through timesteps.
+    pub fn preload_location(&mut self, location_id: &str) -> BmiResult<()> {
+        self.require_initialized()?;
+
+        // Skip if already cached
+        if self.cached_location.as_deref() == Some(location_id) {
+            return Ok(());
+        }
+
+        let loc_idx = self.get_location_idx(location_id)?;
+        let file = self.file.as_ref().ok_or_else(|| BmiError::NotInitialized {
+            model: self.name.clone(),
+        })?;
+
+        self.cached_data.clear();
+
+        // Load all forcing variables for this location
+        for var_name in &self.var_names {
+            let var = file
+                .variable(var_name)
+                .ok_or_else(|| BmiError::BmiFunctionFailed {
+                    model: self.name.clone(),
+                    func: format!("Variable '{}' not found", var_name),
+                })?;
+
+            // Read entire timeseries for this location as f32
+            let values: Vec<f32> =
+                var.get_values((loc_idx, ..))
+                    .map_err(|e| BmiError::BmiFunctionFailed {
+                        model: self.name.clone(),
+                        func: format!("Failed to read '{}': {}", var_name, e),
+                    })?;
+
+            self.cached_data.insert(var_name.clone(), values);
+        }
+
+        self.cached_location = Some(location_id.to_string());
+        Ok(())
+    }
+
+    /// Clear the preloaded cache.
+    pub fn clear_cache(&mut self) {
+        self.cached_location = None;
+        self.cached_data.clear();
+    }
+
+    /// Check if data is cached for a location.
+    pub fn is_cached(&self, location_id: &str) -> bool {
+        self.cached_location.as_deref() == Some(location_id)
     }
 
     fn load_metadata(&mut self) -> BmiResult<()> {
@@ -319,6 +377,16 @@ impl NetCdfForcings {
                 func: format!("Unknown location ID: '{}'", location_id),
             })
     }
+
+    /// Get a cached value at index, returning None if not cached.
+    fn get_cached_value(&self, name: &str, location_id: &str, time_index: usize) -> Option<f32> {
+        if self.cached_location.as_deref() != Some(location_id) {
+            return None;
+        }
+        self.cached_data
+            .get(name)
+            .and_then(|v| v.get(time_index).copied())
+    }
 }
 
 impl Forcings for NetCdfForcings {
@@ -365,6 +433,7 @@ impl Forcings for NetCdfForcings {
         self.var_names.clear();
         self.var_info.clear();
         self.var_type_cache.clear();
+        self.clear_cache();
         Ok(())
     }
 
@@ -468,6 +537,14 @@ impl Forcings for NetCdfForcings {
 
     fn get_value_f64(&self, name: &str, location_id: &str) -> BmiResult<Vec<f64>> {
         self.require_initialized()?;
+
+        // Use cache if available
+        if self.is_cached(location_id) {
+            if let Some(data) = self.cached_data.get(name) {
+                return Ok(data.iter().map(|&v| v as f64).collect());
+            }
+        }
+
         let idx = self.get_location_idx(location_id)?;
 
         let file = self.file.as_ref().ok_or_else(|| BmiError::NotInitialized {
@@ -490,6 +567,14 @@ impl Forcings for NetCdfForcings {
 
     fn get_value_f32(&self, name: &str, location_id: &str) -> BmiResult<Vec<f32>> {
         self.require_initialized()?;
+
+        // Use cache if available
+        if self.is_cached(location_id) {
+            if let Some(data) = self.cached_data.get(name) {
+                return Ok(data.clone());
+            }
+        }
+
         let idx = self.get_location_idx(location_id)?;
 
         let file = self.file.as_ref().ok_or_else(|| BmiError::NotInitialized {
@@ -512,6 +597,14 @@ impl Forcings for NetCdfForcings {
 
     fn get_value_i32(&self, name: &str, location_id: &str) -> BmiResult<Vec<i32>> {
         self.require_initialized()?;
+
+        // Use cache if available (convert from f32)
+        if self.is_cached(location_id) {
+            if let Some(data) = self.cached_data.get(name) {
+                return Ok(data.iter().map(|&v| v as i32).collect());
+            }
+        }
+
         let idx = self.get_location_idx(location_id)?;
 
         let file = self.file.as_ref().ok_or_else(|| BmiError::NotInitialized {
@@ -539,6 +632,13 @@ impl Forcings for NetCdfForcings {
         time_index: usize,
     ) -> BmiResult<f64> {
         self.require_initialized()?;
+
+        // Fast path: use cache
+        if let Some(val) = self.get_cached_value(name, location_id, time_index) {
+            return Ok(val as f64);
+        }
+
+        // Slow path: read from file
         let loc_idx = self.get_location_idx(location_id)?;
 
         let file = self.file.as_ref().ok_or_else(|| BmiError::NotInitialized {
@@ -575,6 +675,13 @@ impl Forcings for NetCdfForcings {
         time_index: usize,
     ) -> BmiResult<f32> {
         self.require_initialized()?;
+
+        // Fast path: use cache
+        if let Some(val) = self.get_cached_value(name, location_id, time_index) {
+            return Ok(val);
+        }
+
+        // Slow path: read from file
         let loc_idx = self.get_location_idx(location_id)?;
 
         let file = self.file.as_ref().ok_or_else(|| BmiError::NotInitialized {
@@ -612,6 +719,17 @@ impl Forcings for NetCdfForcings {
         end_index: usize,
     ) -> BmiResult<Vec<f64>> {
         self.require_initialized()?;
+
+        // Use cache if available
+        if self.is_cached(location_id) {
+            if let Some(data) = self.cached_data.get(name) {
+                return Ok(data[start_index..end_index]
+                    .iter()
+                    .map(|&v| v as f64)
+                    .collect());
+            }
+        }
+
         let loc_idx = self.get_location_idx(location_id)?;
 
         let file = self.file.as_ref().ok_or_else(|| BmiError::NotInitialized {
@@ -640,6 +758,14 @@ impl Forcings for NetCdfForcings {
         end_index: usize,
     ) -> BmiResult<Vec<f32>> {
         self.require_initialized()?;
+
+        // Use cache if available
+        if self.is_cached(location_id) {
+            if let Some(data) = self.cached_data.get(name) {
+                return Ok(data[start_index..end_index].to_vec());
+            }
+        }
+
         let loc_idx = self.get_location_idx(location_id)?;
 
         let file = self.file.as_ref().ok_or_else(|| BmiError::NotInitialized {

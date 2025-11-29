@@ -29,7 +29,7 @@ fn main() -> Result<(), BmiError> {
         .unwrap();
     let locations: Vec<String> = rows.flatten().collect();
 
-    let max_parallel = 8;
+    let max_parallel = 32;
     let mut handles: Vec<Child> = Vec::new();
 
     for location in locations {
@@ -75,13 +75,13 @@ fn run_single_location(location: &str) -> Result<(), BmiError> {
 
     runner.initialize(location)?;
 
-    let mut outputs: Vec<f64> = Vec::new();
-    while runner.has_more_steps() {
-        runner.update()?;
-        outputs.push(runner.get_main_output()?);
-    }
+    // Run all timesteps for all models
+    runner.run()?;
 
+    // Get results
+    let outputs = runner.get_main_outputs()?;
     println!("Completed {} timesteps for {}", outputs.len(), location);
+
     runner.finalize()?;
     Ok(())
 }
@@ -232,7 +232,7 @@ fn run_model(model: &mut dyn Bmi) -> Result<(), BmiError> {
     }
 
     println!();
-    println!("✓ Completed {} steps", step);
+    println!("✔ Completed {} steps", step);
 
     Ok(())
 }
