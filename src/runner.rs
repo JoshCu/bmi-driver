@@ -21,16 +21,16 @@ pub enum VarSource {
 }
 
 pub struct ModelRunner {
-    config: RealizationConfig,
-    forcings: NetCdfForcings,
-    vars: HashMap<String, VarSource>,
-    models: Vec<ModelInstance>,
-    total_steps: usize,
-    location_id: String,
-    fortran_middleware: Option<String>,
-    outputs: HashMap<String, Vec<f64>>,
-    final_outputs: Vec<f64>,
-    has_run: bool,
+    pub config: RealizationConfig,
+    pub forcings: NetCdfForcings,
+    pub vars: HashMap<String, VarSource>,
+    pub models: Vec<ModelInstance>,
+    pub total_steps: usize,
+    pub location_id: String,
+    pub fortran_middleware: Option<String>,
+    pub outputs: HashMap<String, Vec<f64>>,
+    pub final_outputs: Vec<f64>,
+    pub has_run: bool,
 }
 
 impl ModelRunner {
@@ -76,7 +76,8 @@ impl ModelRunner {
 
     fn load_models(&mut self, loc_id: &str) -> BmiResult<()> {
         let modules: Vec<ModuleConfig> = self.config.modules().into_iter().cloned().collect();
-        let mut pending: Vec<(ModuleConfig, Vec<String>)> = modules.into_iter()
+        let mut pending: Vec<(ModuleConfig, Vec<String>)> = modules
+            .into_iter()
             .map(|m| {
                 let deps: Vec<String> = m.params.variables_names_map.values().cloned().collect();
                 (m, deps)
@@ -90,16 +91,17 @@ impl ModelRunner {
         while !pending.is_empty() && iter < max_iter {
             iter += 1;
 
-            let resolved = pending.iter().position(|(_, deps)| {
-                deps.iter().all(|d| self.vars.contains_key(d))
-            });
+            let resolved = pending
+                .iter()
+                .position(|(_, deps)| deps.iter().all(|d| self.vars.contains_key(d)));
 
             if let Some(i) = resolved {
                 let (module, _) = pending.remove(i);
                 self.load_model(&module, loc_id, idx)?;
                 idx += 1;
             } else {
-                let missing: Vec<_> = pending.iter()
+                let missing: Vec<_> = pending
+                    .iter()
                     .flat_map(|(_, deps)| deps.iter())
                     .filter(|d| !self.vars.contains_key(*d))
                     .cloned()
@@ -114,18 +116,20 @@ impl ModelRunner {
     }
 
     fn load_model(&mut self, module: &ModuleConfig, loc_id: &str, idx: usize) -> BmiResult<()> {
-        let is_sloth = module.name == "bmi_c++" && module.params.model_type_name.to_uppercase() == "SLOTH";
+        let is_sloth =
+            module.name == "bmi_c++" && module.params.model_type_name.to_uppercase() == "SLOTH";
 
         let mut model: Box<dyn Bmi> = if is_sloth {
             let mut sloth = BmiSloth::new(&module.params.model_type_name);
             sloth.configure(&module.params.params_string())?;
             Box::new(sloth)
         } else {
-            let adapter = BmiAdapterType::from_name(&module.name)
-                .ok_or_else(|| BmiError::FunctionFailed {
+            let adapter = BmiAdapterType::from_name(&module.name).ok_or_else(|| {
+                BmiError::FunctionFailed {
                     model: module.params.model_type_name.clone(),
                     func: format!("Unknown adapter: {}", module.name),
-                })?;
+                }
+            })?;
 
             match adapter {
                 BmiAdapterType::C => {
@@ -134,13 +138,26 @@ impl ModelRunner {
                     } else {
                         &module.params.registration_function
                     };
-                    Box::new(BmiC::load(&module.params.model_type_name, &module.params.library_file, reg)?)
+                    Box::new(BmiC::load(
+                        &module.params.model_type_name,
+                        &module.params.library_file,
+                        reg,
+                    )?)
                 }
                 BmiAdapterType::Fortran => {
                     if let Some(ref mw) = self.fortran_middleware {
-                        Box::new(BmiFortran::load(&module.params.model_type_name, &module.params.library_file, mw, "register_bmi")?)
+                        Box::new(BmiFortran::load(
+                            &module.params.model_type_name,
+                            &module.params.library_file,
+                            mw,
+                            "register_bmi",
+                        )?)
                     } else {
-                        Box::new(BmiFortran::load_single(&module.params.model_type_name, &module.params.library_file, "register_bmi")?)
+                        Box::new(BmiFortran::load_single(
+                            &module.params.model_type_name,
+                            &module.params.library_file,
+                            "register_bmi",
+                        )?)
                     }
                 }
             }
@@ -170,7 +187,10 @@ impl ModelRunner {
 
     pub fn run(&mut self) -> BmiResult<()> {
         if self.has_run {
-            return Err(BmiError::FunctionFailed { model: "runner".into(), func: "already run".into() });
+            return Err(BmiError::FunctionFailed {
+                model: "runner".into(),
+                func: "already run".into(),
+            });
         }
 
         for i in 0..self.models.len() {
@@ -189,7 +209,8 @@ impl ModelRunner {
 
     fn run_model(&mut self, idx: usize) -> BmiResult<()> {
         let output_names: Vec<String> = self.models[idx].model.get_output_var_names()?;
-        let mut outs: HashMap<String, Vec<f64>> = output_names.iter()
+        let mut outs: HashMap<String, Vec<f64>> = output_names
+            .iter()
             .map(|n| (n.clone(), Vec::with_capacity(self.total_steps)))
             .collect();
 
@@ -219,14 +240,14 @@ impl ModelRunner {
     fn get_var(&self, name: &str, step: usize) -> BmiResult<f64> {
         match self.vars.get(name) {
             Some(VarSource::Forcing) => self.forcings.get_f64(name, &self.location_id, step),
-            Some(VarSource::Model(_)) => {
-                self.outputs.get(name)
-                    .and_then(|v| v.get(step).copied())
-                    .ok_or_else(|| BmiError::FunctionFailed {
-                        model: "runner".into(),
-                        func: format!("'{}' not available at step {}", name, step),
-                    })
-            }
+            Some(VarSource::Model(_)) => self
+                .outputs
+                .get(name)
+                .and_then(|v| v.get(step).copied())
+                .ok_or_else(|| BmiError::FunctionFailed {
+                    model: "runner".into(),
+                    func: format!("'{}' not available at step {}", name, step),
+                }),
             None => Err(BmiError::FunctionFailed {
                 model: "runner".into(),
                 func: format!("Unknown variable: {}", name),
@@ -234,27 +255,39 @@ impl ModelRunner {
         }
     }
 
-    pub fn total_steps(&self) -> usize { self.total_steps }
+    pub fn total_steps(&self) -> usize {
+        self.total_steps
+    }
 
     pub fn main_outputs(&self) -> BmiResult<&Vec<f64>> {
         if !self.has_run {
-            return Err(BmiError::FunctionFailed { model: "runner".into(), func: "call run() first".into() });
+            return Err(BmiError::FunctionFailed {
+                model: "runner".into(),
+                func: "call run() first".into(),
+            });
         }
         Ok(&self.final_outputs)
     }
 
     pub fn outputs(&self, name: &str) -> BmiResult<&Vec<f64>> {
         if !self.has_run {
-            return Err(BmiError::FunctionFailed { model: "runner".into(), func: "call run() first".into() });
+            return Err(BmiError::FunctionFailed {
+                model: "runner".into(),
+                func: "call run() first".into(),
+            });
         }
-        self.outputs.get(name).ok_or_else(|| BmiError::FunctionFailed {
-            model: "runner".into(),
-            func: format!("Output '{}' not found", name),
-        })
+        self.outputs
+            .get(name)
+            .ok_or_else(|| BmiError::FunctionFailed {
+                model: "runner".into(),
+                func: format!("Output '{}' not found", name),
+            })
     }
 
     pub fn finalize(&mut self) -> BmiResult<()> {
-        for m in &mut self.models { m.model.finalize()?; }
+        for m in &mut self.models {
+            m.model.finalize()?;
+        }
         self.forcings.finalize()?;
         self.models.clear();
         self.vars.clear();
@@ -263,12 +296,22 @@ impl ModelRunner {
         Ok(())
     }
 
-    pub fn forcings(&self) -> &NetCdfForcings { &self.forcings }
-    pub fn model(&self, idx: usize) -> Option<&ModelInstance> { self.models.get(idx) }
-    pub fn model_count(&self) -> usize { self.models.len() }
-    pub fn location(&self) -> &str { &self.location_id }
+    pub fn forcings(&self) -> &NetCdfForcings {
+        &self.forcings
+    }
+    pub fn model(&self, idx: usize) -> Option<&ModelInstance> {
+        self.models.get(idx)
+    }
+    pub fn model_count(&self) -> usize {
+        self.models.len()
+    }
+    pub fn location(&self) -> &str {
+        &self.location_id
+    }
 }
 
 impl Drop for ModelRunner {
-    fn drop(&mut self) { let _ = self.finalize(); }
+    fn drop(&mut self) {
+        let _ = self.finalize();
+    }
 }

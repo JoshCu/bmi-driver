@@ -1,50 +1,56 @@
+use anyhow::{Context, Result};
 use bmi::{preload_dependencies, Bmi, BmiError, BmiExt, ModelRunner};
+use clap::{command, Parser};
 use std::path::PathBuf;
 use std::process::{Child, Command};
 
-fn main() -> Result<(), BmiError> {
-    let args: Vec<String> = std::env::args().collect();
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+struct Args {
+    data_dir: PathBuf,
+    // info: bool,
+}
 
-    // Child process: run locations passed as args
-    if args.len() >= 2 {
-        preload_dependencies();
-        for location in &args[1..] {
-            if let Err(e) = run_single_location(location) {
-                eprintln!("Error processing {}: {:?}", location, e);
-            }
-        }
-        return Ok(());
-    }
+fn main() -> Result<(), BmiError> {
+    let args = Args::parse();
+    let data_dir = args.data_dir;
+    let config_dir = data_dir.join("config");
 
     // Parent process: read locations from gpkg and spawn workers
     preload_dependencies();
 
-    let db_path = PathBuf::from(
-        "/home/josh/code/JoshCu/hf_resample/output/cost_test/config/cost_test_subset.gpkg",
-    );
+    let db_path = config_dir
+        .read_dir()
+        .unwrap()
+        .filter_map(Result::ok)
+        .find(|entry| entry.path().extension().map_or(false, |ext| ext == "gpkg"))
+        .unwrap()
+        .path();
+
+    let realization = config_dir.join("realization.json");
+
     let conn = rusqlite::Connection::open(&db_path).unwrap();
     let mut stmt = conn.prepare("SELECT divide_id FROM 'divides'").unwrap();
     let rows = stmt
         .query_map([], |row| Ok(row.get::<_, String>(0)?))
         .unwrap();
     let locations: Vec<String> = rows.flatten().collect();
-
-    let num_processes = 32;
-    let chunk_size = (locations.len() + num_processes - 1) / num_processes;
-
-    let mut handles: Vec<Child> = Vec::new();
-    for chunk in locations.chunks(chunk_size) {
-        let child = Command::new(&args[0])
-            .args(chunk)
-            .spawn()
-            .expect("Failed to spawn");
-        handles.push(child);
+    let mut runner = ModelRunner::from_config(realization)?;
+    // if args.info {
+    //     for instance in runner.models {
+    //         let model = instance.model;
+    //         print_model_info(model)
+    //     }
+    // }
+    for location in locations {
+        runner.initialize(&location)?;
+        runner.run()?;
+        let _outputs = runner.main_outputs()?;
+        // for val in _outputs {
+        //     println!("{:.9}", val);
+        // }
+        runner.finalize()?;
     }
-
-    for mut h in handles {
-        h.wait().ok();
-    }
-
     Ok(())
 }
 
@@ -57,6 +63,9 @@ fn run_single_location(location: &str) -> Result<(), BmiError> {
     runner.run()?;
 
     let _outputs = runner.main_outputs()?;
+    for val in _outputs {
+        println!("{}", val);
+    }
     runner.finalize()?;
     Ok(())
 }
