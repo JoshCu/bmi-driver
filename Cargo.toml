@@ -1,7 +1,12 @@
 [package]
-name = "bmi"
-version = "0.1.0"
+name = "bmi-driver"
+version = "0.0.0"
 edition = "2021"
+description = "Basic Model Interface (BMI) driver with support for C and Fortran models."
+license = "MIT"
+authors = ["Claude","Josh Cu"]
+repository = "https://github.com/JoshCu/bmi-driver"
+readme = "README.md"
 
 [dependencies]
 thiserror = "1.0"

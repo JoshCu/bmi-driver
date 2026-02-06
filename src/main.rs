@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use bmi::{preload_dependencies, Bmi, BmiError, BmiExt, ModelRunner};
+use bmi_driver::{preload_dependencies, Bmi, BmiError, BmiExt, ModelRunner};
 use clap::{command, Parser};
 use std::path::PathBuf;
 use std::process::{Child, Command};

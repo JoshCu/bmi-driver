@@ -1,6 +1,6 @@
-# BMI-RS
+# BMI-DRIVER-RS
 
-Rust bindings for the Basic Model Interface (BMI) with support for C and Fortran models.
+Basic Model Interface (BMI) driver with support for C and Fortran models.
 
 ## Usage
 
