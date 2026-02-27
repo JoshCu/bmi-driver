@@ -1,10 +1,10 @@
 use bmi_driver::{preload_dependencies, Bmi, BmiError, ModelRunner};
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
-use std::path::PathBuf;
-use std::process::Command;
 use std::env;
 use std::fs;
+use std::path::PathBuf;
+use std::process::Command;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -42,7 +42,6 @@ fn main() -> Result<(), BmiError> {
 
     let realization = config_dir.join("realization.json");
 
-
     let conn = rusqlite::Connection::open(&db_path).unwrap();
     let mut stmt = conn.prepare("SELECT divide_id FROM 'divides'").unwrap();
     let rows = stmt
@@ -52,7 +51,8 @@ fn main() -> Result<(), BmiError> {
 
     if let (Some(start), Some(end)) = (args.worker_start, args.worker_end) {
         // Worker mode: process assigned slice of locations
-        run_worker(&realization, &locations[start..end])
+        let output_path = data_dir.join("outputs").join("bmi-driver");
+        run_worker(&realization, &locations[start..end], &output_path)
     } else {
         // Parent mode: spawn worker processes
         run_parent(&data_dir, &locations, args.jobs)
@@ -64,7 +64,11 @@ fn run_parent(
     locations: &[String],
     jobs: Option<usize>,
 ) -> Result<(), BmiError> {
-    let n_workers = jobs.unwrap_or_else(|| std::thread::available_parallelism().map(|p| p.get()).unwrap_or(1));
+    let n_workers = jobs.unwrap_or_else(|| {
+        std::thread::available_parallelism()
+            .map(|p| p.get())
+            .unwrap_or(1)
+    });
     let n_locations = locations.len();
     let chunk_size = (n_locations + n_workers - 1) / n_workers;
 
@@ -129,22 +133,107 @@ fn run_parent(
     Ok(())
 }
 
-fn run_worker(realization: &PathBuf, locations: &[String]) -> Result<(), BmiError> {
+fn run_worker(
+    realization: &PathBuf,
+    locations: &[String],
+    output_path: &PathBuf,
+) -> Result<(), BmiError> {
     let mut runner = ModelRunner::from_config(realization)?;
-    let output_path = data_dir.join("outputs").join("bmi-driver");
+    let start_epoch = bmi_driver::parse_datetime(&runner.config.time.start_time)?;
+    let interval = runner.config.time.output_interval;
+    let output_vars: Vec<String> = runner
+        .config
+        .global
+        .formulations
+        .first()
+        .map(|f| f.params.output_variables.clone())
+        .unwrap_or_default();
+
     for location in locations {
         runner.initialize(location)?;
         runner.run()?;
-        let _outputs = runner.main_outputs()?;
-        let cat_out = output_path.join(format!("{}.csv",location))
-        // output needs to match
-        // Time Step,Time,Q_OUT
-        // 0,2010-01-01 00:00:00,0.000809171
-        // 1,2010-01-01 01:00:00,0.000736643
-        // for val in _outputs{println!("{} {:.9}",location,val);}
+
+        let columns: Vec<(&str, &Vec<f64>)> = if output_vars.is_empty() {
+            // Get all outputs
+            runner
+                .outputs
+                .iter()
+                .map(|(name, vals)| (name.as_str(), vals))
+                .collect()
+        } else {
+            output_vars
+                .iter()
+                .filter_map(|name| runner.outputs(name).ok().map(|vals| (name.as_str(), vals)))
+                .collect()
+        };
+
+        let csv_path = output_path.join(format!("{}.csv", location));
+        let mut csv = String::from("Time Step,Time");
+        for (name, _) in &columns {
+            csv.push(',');
+            csv.push_str(name);
+        }
+        csv.push('\n');
+
+        // Rows
+        let n_steps = columns.first().map(|(_, v)| v.len()).unwrap_or(0);
+        for i in 0..n_steps {
+            let ts = start_epoch + (i as i64) * interval;
+            csv.push_str(&format!("{},{}", i, format_epoch(ts)));
+            for (_, vals) in &columns {
+                csv.push_str(&format!(",{:.9}", vals[i]));
+            }
+            csv.push('\n');
+        }
+
+        fs::write(&csv_path, csv).map_err(|e| BmiError::FunctionFailed {
+            model: "runner".into(),
+            func: format!("Failed to write {}: {}", csv_path.display(), e),
+        })?;
+
         runner.finalize()?;
     }
     Ok(())
+}
+
+fn format_epoch(epoch: i64) -> String {
+    let secs_per_day: i64 = 86400;
+    let mut remaining = epoch;
+    let sec = remaining % 60;
+    remaining /= 60;
+    let min = remaining % 60;
+    remaining /= 60;
+    let hour = remaining % 24;
+    let mut days = epoch / secs_per_day;
+
+    let leap = |y: i32| (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    let days_in_month = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
+    let mut year = 1970i32;
+    loop {
+        let yd = if leap(year) { 366 } else { 365 };
+        if days < yd {
+            break;
+        }
+        days -= yd;
+        year += 1;
+    }
+
+    let mut month = 0u32;
+    for m in 0..12 {
+        let md = days_in_month[m] as i64 + if m == 1 && leap(year) { 1 } else { 0 };
+        if days < md {
+            month = m as u32 + 1;
+            break;
+        }
+        days -= md;
+    }
+    let day = days + 1;
+
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        year, month, day, hour, min, sec
+    )
 }
 
 fn run_single_location(location: &str) -> Result<(), BmiError> {

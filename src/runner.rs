@@ -219,7 +219,7 @@ impl ModelRunner {
 
         let input_map = self.models[idx].input_map.clone();
 
-        for step in 0..self.total_steps+1 {
+        for step in 0..self.total_steps + 1 {
             for (model_input, source) in &input_map {
                 let val = self.get_var(source, step)?;
                 self.models[idx].model.set_value(model_input, &[val])?;

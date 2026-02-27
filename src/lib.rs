@@ -8,7 +8,7 @@ mod runner;
 mod traits;
 
 pub use adapters::{BmiC, BmiFortran, BmiSloth};
-pub use config::{BmiAdapterType, ModuleConfig, RealizationConfig};
+pub use config::{parse_datetime, BmiAdapterType, ModuleConfig, RealizationConfig};
 pub use error::{BmiError, BmiResult};
 pub use forcings::{Forcings, NetCdfForcings};
 pub use library::preload_dependencies;
