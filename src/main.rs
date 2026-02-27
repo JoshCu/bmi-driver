@@ -1,10 +1,12 @@
 use bmi_driver::{preload_dependencies, Bmi, BmiError, ModelRunner};
 use clap::Parser;
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::env;
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::thread;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -50,11 +52,9 @@ fn main() -> Result<(), BmiError> {
     let locations: Vec<String> = rows.flatten().collect();
 
     if let (Some(start), Some(end)) = (args.worker_start, args.worker_end) {
-        // Worker mode: process assigned slice of locations
         let output_path = data_dir.join("outputs").join("bmi-driver");
         run_worker(&realization, &locations[start..end], &output_path)
     } else {
-        // Parent mode: spawn worker processes
         run_parent(&data_dir, &locations, args.jobs)
     }
 }
@@ -75,61 +75,104 @@ fn run_parent(
     let exe = env::current_exe().unwrap();
 
     let output_path = data_dir.join("outputs").join("bmi-driver");
-    fs::create_dir_all(output_path).unwrap();
+    fs::create_dir_all(&output_path).unwrap();
 
-    let pb = ProgressBar::new(n_locations as u64);
-    pb.set_style(
-        ProgressStyle::with_template("{bar:40} {pos}/{len} {msg}")
-            .unwrap()
-            .progress_chars("##-"),
+    let mp = MultiProgress::new();
+
+    // Overall progress bar at the top
+    let overall_pb = mp.add(ProgressBar::new(n_locations as u64));
+    overall_pb.set_style(
+        ProgressStyle::with_template(
+            "{spinner:.green} [{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} ({per_sec}) {msg}",
+        )
+        .unwrap()
+        .progress_chars("━╸─"),
     );
+    overall_pb.enable_steady_tick(std::time::Duration::from_millis(100));
+    overall_pb.set_message("total");
 
-    let mut children = Vec::new();
+    // Per-worker style
+    let worker_style =
+        ProgressStyle::with_template("  worker {msg}: {bar:30.white/black} {pos}/{len}")
+            .unwrap()
+            .progress_chars("━╸─");
+
+    let mut handles = Vec::new();
+
     for i in 0..n_workers {
         let start = i * chunk_size;
         if start >= n_locations {
             break;
         }
         let end = ((i + 1) * chunk_size).min(n_locations);
+        let worker_count = (end - start) as u64;
 
-        let child = Command::new(&exe)
+        let mut child = Command::new(&exe)
             .arg(data_dir)
             .arg("--worker-start")
             .arg(start.to_string())
             .arg("--worker-end")
             .arg(end.to_string())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
             .spawn()
             .map_err(|e| BmiError::FunctionFailed {
                 model: "runner".into(),
                 func: format!("Failed to spawn worker: {}", e),
             })?;
-        children.push((child, end - start));
+
+        let worker_pb = mp.add(ProgressBar::new(worker_count));
+        worker_pb.set_style(worker_style.clone());
+        worker_pb.set_message(format!("{}", i));
+
+        let stdout = child.stdout.take().unwrap();
+        let overall_pb = overall_pb.clone();
+
+        let handle = thread::spawn(move || {
+            let reader = BufReader::new(stdout);
+            let mut prev = 0u64;
+            for line in reader.lines().flatten() {
+                if let Ok(count) = line.trim().parse::<u64>() {
+                    let delta = count - prev;
+                    worker_pb.inc(delta);
+                    overall_pb.inc(delta);
+                    prev = count;
+                }
+            }
+            worker_pb.finish_and_clear();
+            child.wait()
+        });
+        handles.push(handle);
     }
 
-    pb.set_message(format!("{} workers", children.len()));
-
     let mut failed = false;
-    for (mut child, count) in children {
-        let status = child.wait().map_err(|e| BmiError::FunctionFailed {
-            model: "runner".into(),
-            func: format!("Worker error: {}", e),
-        })?;
-        if !status.success() {
-            eprintln!("Worker exited with: {}", status);
-            failed = true;
+    for handle in handles {
+        match handle.join() {
+            Ok(Ok(status)) if status.success() => {}
+            Ok(Ok(status)) => {
+                eprintln!("Worker exited with: {}", status);
+                failed = true;
+            }
+            Ok(Err(e)) => {
+                eprintln!("Worker error: {}", e);
+                failed = true;
+            }
+            Err(_) => {
+                eprintln!("Worker thread panicked");
+                failed = true;
+            }
         }
-        pb.inc(count as u64);
     }
 
     if failed {
-        pb.finish_with_message("failed");
+        overall_pb.finish_with_message("failed");
         return Err(BmiError::FunctionFailed {
             model: "runner".into(),
             func: "One or more workers failed".into(),
         });
     }
 
-    pb.finish_with_message("done");
+    overall_pb.finish_with_message("done ✓");
     Ok(())
 }
 
@@ -149,12 +192,13 @@ fn run_worker(
         .map(|f| f.params.output_variables.clone())
         .unwrap_or_default();
 
-    for location in locations {
+    let report_interval = ((locations.len() as f64) * 0.01).ceil().max(1.0) as usize;
+
+    for (i, location) in locations.iter().enumerate() {
         runner.initialize(location)?;
         runner.run()?;
 
         let columns: Vec<(&str, &Vec<f64>)> = if output_vars.is_empty() {
-            // Get all outputs
             runner
                 .outputs
                 .iter()
@@ -175,13 +219,12 @@ fn run_worker(
         }
         csv.push('\n');
 
-        // Rows
         let n_steps = columns.first().map(|(_, v)| v.len()).unwrap_or(0);
-        for i in 0..n_steps {
-            let ts = start_epoch + (i as i64) * interval;
-            csv.push_str(&format!("{},{}", i, format_epoch(ts)));
+        for step in 0..n_steps {
+            let ts = start_epoch + (step as i64) * interval;
+            csv.push_str(&format!("{},{}", step, format_epoch(ts)));
             for (_, vals) in &columns {
-                csv.push_str(&format!(",{:.9}", vals[i]));
+                csv.push_str(&format!(",{:.9}", vals[step]));
             }
             csv.push('\n');
         }
@@ -192,6 +235,10 @@ fn run_worker(
         })?;
 
         runner.finalize()?;
+
+        if (i + 1) % report_interval == 0 || i + 1 == locations.len() {
+            println!("{}", i + 1);
+        }
     }
     Ok(())
 }
@@ -234,75 +281,4 @@ fn format_epoch(epoch: i64) -> String {
         "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
         year, month, day, hour, min, sec
     )
-}
-
-fn run_single_location(location: &str) -> Result<(), BmiError> {
-    let mut runner = ModelRunner::from_config(
-        "/home/josh/code/JoshCu/hf_resample/output/cost_test/config/realization.json",
-    )?;
-
-    runner.initialize(location)?;
-    runner.run()?;
-
-    let _outputs = runner.main_outputs()?;
-    for val in _outputs {
-        println!("{}", val);
-    }
-    runner.finalize()?;
-    Ok(())
-}
-
-fn print_model_info(model: &dyn Bmi) -> Result<(), BmiError> {
-    println!("=== Model Information ===");
-    println!("Component name: {}", model.get_component_name()?);
-    println!();
-
-    println!("=== Time Information ===");
-    println!("Time units: {}", model.get_time_units()?);
-    println!("Time factor: {} (to seconds)", model.time_factor());
-    println!("Start time: {}", model.get_start_time()?);
-    println!("End time: {}", model.get_end_time()?);
-    println!("Time step: {}", model.get_time_step()?);
-    println!("Current time: {}", model.get_current_time()?);
-    println!();
-
-    println!(
-        "=== Input Variables ({}) ===",
-        model.get_input_item_count()?
-    );
-    for name in model.get_input_var_names()? {
-        print_var_info(model, &name)?;
-    }
-    println!();
-
-    println!(
-        "=== Output Variables ({}) ===",
-        model.get_output_item_count()?
-    );
-    for name in model.get_output_var_names()? {
-        print_var_info(model, &name)?;
-    }
-    println!();
-
-    Ok(())
-}
-
-fn print_var_info(model: &dyn Bmi, name: &str) -> Result<(), BmiError> {
-    let var_type = model.get_var_type(name)?;
-    let units = model.get_var_units(name)?;
-    let itemsize = model.get_var_itemsize(name)?;
-    let nbytes = model.get_var_nbytes(name)?;
-    let grid = model.get_var_grid(name)?;
-    let location = model.get_var_location(name)?;
-
-    println!(
-        "  {} [{}]",
-        name,
-        if units.is_empty() { "-" } else { &units }
-    );
-    println!(
-        "    type: {}, itemsize: {}, nbytes: {}, grid: {}, location: {}",
-        var_type, itemsize, nbytes, grid, location
-    );
-    Ok(())
 }
