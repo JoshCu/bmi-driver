@@ -59,9 +59,12 @@ impl ModelRunner {
 
     pub fn initialize(&mut self, loc_id: &str) -> BmiResult<()> {
         self.location_id = loc_id.to_string();
+        self.has_run = false;
+
         self.forcings.initialize(&self.config.global.forcing.path)?;
         self.forcings.preload_location(loc_id)?;
 
+        self.vars.clear();
         for name in self.forcings.var_names()? {
             self.vars.insert(name, VarSource::Forcing);
         }
@@ -216,7 +219,7 @@ impl ModelRunner {
 
         let input_map = self.models[idx].input_map.clone();
 
-        for step in 0..self.total_steps {
+        for step in 0..self.total_steps+1 {
             for (model_input, source) in &input_map {
                 let val = self.get_var(source, step)?;
                 self.models[idx].model.set_value(model_input, &[val])?;
@@ -288,11 +291,17 @@ impl ModelRunner {
         for m in &mut self.models {
             m.model.finalize()?;
         }
-        self.forcings.finalize()?;
         self.models.clear();
         self.vars.clear();
         self.outputs.clear();
         self.final_outputs.clear();
+        self.has_run = false;
+        Ok(())
+    }
+
+    pub fn close(&mut self) -> BmiResult<()> {
+        self.finalize()?;
+        self.forcings.finalize()?;
         Ok(())
     }
 
@@ -312,6 +321,6 @@ impl ModelRunner {
 
 impl Drop for ModelRunner {
     fn drop(&mut self) {
-        let _ = self.finalize();
+        let _ = self.close();
     }
 }

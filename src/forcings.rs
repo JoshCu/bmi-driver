@@ -39,6 +39,7 @@ pub struct NetCdfForcings {
     name: String,
     file: Option<NetCdfFile>,
     initialized: bool,
+    path: Option<String>,
     location_ids: Vec<String>,
     location_index: HashMap<String, usize>,
     var_names: Vec<String>,
@@ -57,6 +58,7 @@ impl NetCdfForcings {
             name: name.into(),
             file: None,
             initialized: false,
+            path: None,
             location_ids: Vec::new(),
             location_index: HashMap::new(),
             var_names: Vec::new(),
@@ -183,10 +185,13 @@ impl Forcings for NetCdfForcings {
     fn is_initialized(&self) -> bool { self.initialized }
 
     fn initialize(&mut self, path: &str) -> BmiResult<()> {
-        if self.initialized { return Err(BmiError::AlreadyInitialized { model: self.name.clone() }); }
+        if self.initialized && self.path.as_deref() == Some(path) {
+            return Ok(());
+        }
         if !Path::new(path).exists() { return Err(BmiError::ConfigNotFound { path: path.into() }); }
 
         self.file = Some(netcdf::open(path).map_err(|e| self.err(&format!("Failed to open: {}", e)))?);
+        self.path = Some(path.to_string());
         self.load_metadata()?;
         self.initialized = true;
         Ok(())
@@ -194,6 +199,7 @@ impl Forcings for NetCdfForcings {
 
     fn finalize(&mut self) -> BmiResult<()> {
         self.file = None;
+        self.path = None;
         self.initialized = false;
         self.location_ids.clear();
         self.location_index.clear();

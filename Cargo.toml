@@ -16,6 +16,7 @@ netcdf = { version = "0.11.1", default-features = false }
 rusqlite = "0.37.0"
 clap = { version = "4.5.53", features = ["derive"] }
 anyhow = "1.0.100"
+indicatif = "0.17"
 
 [[bin]]
 name = "bmi-runner"
