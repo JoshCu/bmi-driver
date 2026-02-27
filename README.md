@@ -4,17 +4,35 @@ Basic Model Interface (BMI) driver with support for C and Fortran models.
 
 ## Usage
 
+```
+bmi-runner <data_dir> [-j <jobs>]
+```
+
+### Arguments
+
+- `<data_dir>` - Path to the data directory. Must contain:
+  - `config/realization.json` - Model realization configuration
+  - `config/<name>.gpkg` - GeoPackage with `divides` table listing location IDs
+  - `forcings/` - NetCDF forcing files
+- `-j, --jobs <N>` - Number of parallel worker processes (default: number of CPUs)
+
+### Output
+
+CSV files are written to `<data_dir>/outputs/bmi-driver/<location_id>.csv`, one per location. Each CSV contains a `Time Step`, `Time`, and one column per output variable.
+
+### Library
+
 ```rust
-use bmi::{ModelRunner, BmiError};
+use bmi_driver::{ModelRunner, BmiError};
 
 fn main() -> Result<(), BmiError> {
-    let mut runner = ModelRunner::from_config("realization.json")?;
+    let mut runner = ModelRunner::from_config("config/realization.json")?;
     runner.initialize("cat-123")?;
     runner.run()?;
-    
+
     let outputs = runner.main_outputs()?;
     println!("Completed {} timesteps", outputs.len());
-    
+
     runner.finalize()?;
     Ok(())
 }
@@ -30,6 +48,7 @@ fn main() -> Result<(), BmiError> {
 
 ```
 src/
+├── main.rs          # CLI entry point (bmi-runner binary)
 ├── lib.rs           # Public exports
 ├── traits.rs        # Bmi trait and types
 ├── error.rs         # Error types
