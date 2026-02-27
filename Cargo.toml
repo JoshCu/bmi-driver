@@ -1,21 +1,23 @@
 [package]
-name = "bmi-rs"
-version = "0.2.0"
+name = "bmi-driver"
+version = "0.0.0"
 edition = "2021"
-description = "Rust adapter for Basic Model Interface (BMI) C and Fortran libraries"
+description = "Basic Model Interface (BMI) driver with support for C and Fortran models."
 license = "MIT"
-
-[lib]
-name = "bmi"
-path = "src/lib.rs"
-
-[[bin]]
-name = "bmi-example"
-path = "src/main.rs"
+authors = ["Claude","Josh Cu"]
+repository = "https://github.com/JoshCu/bmi-driver"
+readme = "README.md"
 
 [dependencies]
-netcdf = {version = "0.11.1", default-features = false}
-rusqlite = "0.37.0"
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.145"
 thiserror = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+netcdf = { version = "0.11.1", default-features = false }
+rusqlite = "0.37.0"
+clap = { version = "4.5.53", features = ["derive"] }
+anyhow = "1.0.100"
+indicatif = "0.17"
+
+[[bin]]
+name = "bmi-runner"
+path = "src/main.rs"
