@@ -9,8 +9,17 @@ use super::check_initialized;
 
 /// A BMI adapter that drives any Python class implementing the BMI interface.
 ///
-/// `library_file` in the realization config should be the path to the `.py` file.
-/// `registration_function` should be the name of the BMI class inside that file.
+/// Two loading modes are supported:
+///
+/// 1. **File-based** (`load`): Set `library_file` to the path of a `.py` file and
+///    `registration_function` to the class name. The file's parent directory is prepended
+///    to `sys.path` so that the module can be imported by its stem name.
+///
+/// 2. **Dotted module path** (`load_from_type`): Set `python_type` to a dotted path like
+///    `"lstm.bmi_lstm.bmi_LSTM"`. The last component is the class name and everything
+///    before it is the module path. The package must be installed or already on `PYTHONPATH`.
+///    This matches the ngen `python_type` realization convention.
+///
 /// The class is instantiated with no arguments; `initialize(config)` is called separately.
 pub struct BmiPython {
     model_name: String,
@@ -21,7 +30,43 @@ pub struct BmiPython {
 }
 
 impl BmiPython {
-    /// Import `module_path` as a Python module and instantiate `class_name`.
+    /// Import a Python BMI class from a dotted `python_type` path.
+    ///
+    /// `python_type` should be a dotted string like `"lstm.bmi_lstm.bmi_LSTM"` where the
+    /// last component is the class name and the preceding components form the module path.
+    /// The package must already be importable (installed or on `PYTHONPATH`).
+    pub fn load_from_type(
+        name: impl Into<String>,
+        python_type: &str,
+    ) -> BmiResult<Self> {
+        let name = name.into();
+
+        let dot_pos = python_type.rfind('.').ok_or_else(|| BmiError::FunctionFailed {
+            model: name.clone(),
+            func: format!(
+                "python_type '{}' must be a dotted path like 'package.module.ClassName'",
+                python_type
+            ),
+        })?;
+        let module_path = &python_type[..dot_pos];
+        let class_name = &python_type[dot_pos + 1..];
+
+        let obj = Python::with_gil(|py| -> PyResult<PyObject> {
+            let instance = py.import_bound(module_path)?.getattr(class_name)?.call0()?;
+            Ok(instance.unbind())
+        })
+        .map_err(|e| BmiError::FunctionFailed {
+            model: name.clone(),
+            func: format!("load_from_type: {e}"),
+        })?;
+
+        Ok(Self { model_name: name, obj, initialized: false, time_factor: 1.0, type_cache: None })
+    }
+
+    /// Import a `.py` file as a Python module and instantiate `class_name`.
+    ///
+    /// The file's parent directory is prepended to `sys.path` so the module can be imported.
+    /// Use this when `library_file` and `registration_function` are set in the realization config.
     pub fn load(
         name: impl Into<String>,
         module_path: impl AsRef<Path>,

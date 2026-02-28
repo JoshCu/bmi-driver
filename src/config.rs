@@ -85,6 +85,8 @@ pub struct ModuleParams {
     #[serde(default)]
     pub model_params: HashMap<String, serde_json::Value>,
     #[serde(default)]
+    pub python_type: String,
+    #[serde(default)]
     pub allow_exceed_end_time: bool,
     #[serde(default)]
     pub fixed_time_step: bool,
