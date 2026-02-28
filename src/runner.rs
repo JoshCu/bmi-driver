@@ -6,12 +6,25 @@ use crate::config::{parse_datetime, BmiAdapterType, ModuleConfig, RealizationCon
 use crate::error::{BmiError, BmiResult};
 use crate::forcings::{Forcings, NetCdfForcings};
 use crate::traits::{Bmi, BmiExt};
+use crate::aliases;
+use crate::units::UnitConversion;
 
 pub struct ModelInstance {
     pub name: String,
     pub model: Box<dyn Bmi>,
     pub input_map: HashMap<String, String>,
     pub main_output: String,
+    /// Unit conversions keyed by model input variable name.
+    pub input_conversions: HashMap<String, UnitConversion>,
+}
+
+/// A suggested variable mapping that could be added to the realization config.
+#[derive(Debug, Clone)]
+pub struct SuggestedMapping {
+    pub model_name: String,
+    pub model_idx: usize,
+    pub model_input: String,
+    pub suggested_source: String,
 }
 
 #[derive(Debug, Clone)]
@@ -31,6 +44,7 @@ pub struct ModelRunner {
     pub outputs: HashMap<String, Vec<f64>>,
     pub final_outputs: Vec<f64>,
     pub has_run: bool,
+    pub suppress_warnings: bool,
 }
 
 impl ModelRunner {
@@ -50,6 +64,7 @@ impl ModelRunner {
             outputs: HashMap::new(),
             final_outputs: Vec::new(),
             has_run: false,
+            suppress_warnings: false,
         })
     }
 
@@ -179,11 +194,33 @@ impl ModelRunner {
             self.vars.insert(output.clone(), VarSource::Model(idx));
         }
 
+        // Build unit conversions for each input mapping
+        let mut input_conversions = HashMap::new();
+        for (model_input, source_var) in &module.params.variables_names_map {
+            let dest_units = model.get_var_units(model_input).unwrap_or_default();
+            let source_units = self.get_source_units(source_var);
+
+            if !source_units.is_empty() && !dest_units.is_empty() {
+                let (conv, warning) =
+                    crate::units::find_conversion_or_identity(&source_units, &dest_units);
+                if let Some(warn) = warning {
+                    if !self.suppress_warnings {
+                        eprintln!(
+                            "  WARNING [{}]: {} ← {}: {}",
+                            module.params.model_type_name, model_input, source_var, warn
+                        );
+                    }
+                }
+                input_conversions.insert(model_input.clone(), conv);
+            }
+        }
+
         self.models.push(ModelInstance {
             name: module.params.model_type_name.clone(),
             model,
             input_map: module.params.variables_names_map.clone(),
             main_output: module.params.main_output_variable.clone(),
+            input_conversions,
         });
         Ok(())
     }
@@ -219,9 +256,16 @@ impl ModelRunner {
 
         let input_map = self.models[idx].input_map.clone();
 
+        let conversions = self.models[idx].input_conversions.clone();
+
         for step in 0..self.total_steps + 1 {
             for (model_input, source) in &input_map {
                 let val = self.get_var(source, step)?;
+                let val = if let Some(conv) = conversions.get(model_input) {
+                    conv.convert(val)
+                } else {
+                    val
+                };
                 self.models[idx].model.set_value(model_input, &[val])?;
             }
 
@@ -256,6 +300,130 @@ impl ModelRunner {
                 func: format!("Unknown variable: {}", name),
             }),
         }
+    }
+
+    /// Get the units for a source variable (from forcings or a previous model's output).
+    fn get_source_units(&self, name: &str) -> String {
+        match self.vars.get(name) {
+            Some(VarSource::Forcing) => {
+                self.forcings.var_units(name).unwrap_or_default()
+            }
+            Some(VarSource::Model(idx)) => {
+                if let Some(m) = self.models.get(*idx) {
+                    m.model.get_var_units(name).unwrap_or_default()
+                } else {
+                    String::new()
+                }
+            }
+            None => String::new(),
+        }
+    }
+
+    /// Print only the active (non-identity) unit conversions to stderr.
+    pub fn print_active_conversions(&self) {
+        let mut any = false;
+        for m in &self.models {
+            for (model_input, source_var) in &m.input_map {
+                if let Some(conv) = m.input_conversions.get(model_input) {
+                    if conv.is_identity() {
+                        continue;
+                    }
+                    let source_label = self.source_label(source_var);
+                    eprintln!(
+                        "  {}: {} ← {} ({}): {}",
+                        m.name, model_input, source_var, source_label, conv
+                    );
+                    any = true;
+                }
+            }
+        }
+        if any {
+            eprintln!();
+        }
+    }
+
+    /// Print a full summary of all variable mappings and unit conversions.
+    pub fn print_all_unit_info(&self) {
+        eprintln!("Unit conversions for this run:");
+        let mut any = false;
+        for m in &self.models {
+            for (model_input, source_var) in &m.input_map {
+                let source_label = self.source_label(source_var);
+
+                if let Some(conv) = m.input_conversions.get(model_input) {
+                    eprintln!(
+                        "  {}: {} ← {} ({}): {}",
+                        m.name, model_input, source_var, source_label, conv
+                    );
+                } else {
+                    eprintln!(
+                        "  {}: {} ← {} ({}): no unit info available",
+                        m.name, model_input, source_var, source_label
+                    );
+                }
+                any = true;
+            }
+        }
+        if !any {
+            eprintln!("  (no variable mappings)");
+        }
+    }
+
+    fn source_label(&self, source_var: &str) -> String {
+        match self.vars.get(source_var) {
+            Some(VarSource::Forcing) => "forcing".to_string(),
+            Some(VarSource::Model(idx)) => {
+                self.models.get(*idx)
+                    .map(|src| src.name.clone())
+                    .unwrap_or_else(|| format!("model[{}]", idx))
+            }
+            None => "unknown".to_string(),
+        }
+    }
+
+    /// Check each model's expected inputs against what's available.
+    /// For unmapped inputs, check the alias table for available matches.
+    /// Returns a list of suggested mappings to add to the realization config.
+    pub fn find_missing_mappings(&self) -> Vec<SuggestedMapping> {
+        let mut suggestions = Vec::new();
+
+        for (model_idx, m) in self.models.iter().enumerate() {
+            let input_names = match m.model.get_input_var_names() {
+                Ok(names) => names,
+                Err(_) => continue,
+            };
+
+            let mapped_inputs: std::collections::HashSet<&str> =
+                m.input_map.keys().map(|s| s.as_str()).collect();
+
+            for input_name in &input_names {
+                // Skip if already mapped
+                if mapped_inputs.contains(input_name.as_str()) {
+                    continue;
+                }
+
+                // Skip if the variable is directly available (no mapping needed)
+                if self.vars.contains_key(input_name) {
+                    continue;
+                }
+
+                // Check aliases for this input name
+                let alias_names = aliases::find_aliases(input_name);
+                for alias in alias_names {
+                    if self.vars.contains_key(alias) {
+                        suggestions.push(SuggestedMapping {
+                            model_name: m.name.clone(),
+                            model_idx,
+                            model_input: input_name.clone(),
+                            suggested_source: alias.to_string(),
+                        });
+                        break; // first match is enough
+                    }
+                }
+            }
+        }
+
+        suggestions
     }
 
     pub fn total_steps(&self) -> usize {

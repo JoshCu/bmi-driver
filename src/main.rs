@@ -3,7 +3,7 @@ use clap::Parser;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::env;
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{self, BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::thread;
@@ -24,6 +24,10 @@ struct Args {
     /// Internal: end index for worker mode (exclusive)
     #[arg(long, hide = true)]
     worker_end: Option<usize>,
+
+    /// Print all unit conversion info and exit without running
+    #[arg(long)]
+    units: bool,
 }
 
 fn main() -> Result<(), BmiError> {
@@ -51,19 +55,84 @@ fn main() -> Result<(), BmiError> {
         .unwrap();
     let locations: Vec<String> = rows.flatten().collect();
 
+    if args.units {
+        return print_units(&realization, &locations);
+    }
+
     if let (Some(start), Some(end)) = (args.worker_start, args.worker_end) {
         let output_path = data_dir.join("outputs").join("bmi-driver");
         run_worker(&realization, &locations[start..end], &output_path)
     } else {
-        run_parent(&data_dir, &locations, args.jobs)
+        run_parent(&data_dir, &realization, &locations, args.jobs)
     }
+}
+
+fn print_units(realization: &PathBuf, locations: &[String]) -> Result<(), BmiError> {
+    let mut runner = ModelRunner::from_config(realization)?;
+    if let Some(loc) = locations.first() {
+        runner.initialize(loc)?;
+        runner.print_all_unit_info();
+        runner.finalize()?;
+    } else {
+        eprintln!("No locations found.");
+    }
+    Ok(())
 }
 
 fn run_parent(
     data_dir: &PathBuf,
+    realization: &PathBuf,
     locations: &[String],
     jobs: Option<usize>,
 ) -> Result<(), BmiError> {
+    // Check for missing mappings and print active unit conversions
+    {
+        let mut runner = ModelRunner::from_config(realization)?;
+        if let Some(loc) = locations.first() {
+            runner.initialize(loc)?;
+
+            let suggestions = runner.find_missing_mappings();
+            if !suggestions.is_empty() {
+                eprintln!("Found unmapped model inputs that match available variables:");
+                for (i, s) in suggestions.iter().enumerate() {
+                    eprintln!(
+                        "  [{}] {}: \"{}\" ← \"{}\"",
+                        i + 1,
+                        s.model_name,
+                        s.model_input,
+                        s.suggested_source
+                    );
+                }
+                eprintln!();
+                eprint!("Add these mappings to realization.json? [y/N] ");
+                io::stderr().flush().ok();
+
+                let mut answer = String::new();
+                if io::stdin().read_line(&mut answer).is_ok()
+                    && answer.trim().eq_ignore_ascii_case("y")
+                {
+                    apply_suggestions(realization, &runner, &suggestions)?;
+                    eprintln!("Updated {}. Restarting...", realization.display());
+                    eprintln!();
+                    runner.finalize()?;
+
+                    // Re-initialize with updated config to show new conversions
+                    let mut runner2 = ModelRunner::from_config(realization)?;
+                    runner2.initialize(loc)?;
+                    runner2.print_active_conversions();
+                    runner2.finalize()?;
+                } else {
+                    eprintln!("Skipping. Running with current config.");
+                    runner.print_active_conversions();
+                    runner.finalize()?;
+                }
+            } else {
+                runner.print_active_conversions();
+                runner.finalize()?;
+            }
+        }
+    }
+
     let n_workers = jobs.unwrap_or_else(|| {
         std::thread::available_parallelism()
             .map(|p| p.get())
@@ -176,12 +245,93 @@ fn run_parent(
     Ok(())
 }
 
+fn apply_suggestions(
+    realization: &PathBuf,
+    runner: &ModelRunner,
+    suggestions: &[bmi_driver::runner::SuggestedMapping],
+) -> Result<(), BmiError> {
+    let content = fs::read_to_string(realization).map_err(|e| BmiError::FunctionFailed {
+        model: "config".into(),
+        func: format!("Failed to read {}: {}", realization.display(), e),
+    })?;
+    let mut root: serde_json::Value =
+        serde_json::from_str(&content).map_err(|e| BmiError::FunctionFailed {
+            model: "config".into(),
+            func: format!("Failed to parse {}: {}", realization.display(), e),
+        })?;
+
+    // Group suggestions by model_idx
+    let modules = root["global"]["formulations"]
+        .as_array()
+        .and_then(|f| f.first())
+        .and_then(|f| f["params"]["modules"].as_array().map(|a| a.len()))
+        .unwrap_or(0);
+
+    // Build a map: model_name → module index in the JSON array.
+    // The runner loads modules in dependency order which may differ from config order,
+    // so match by model_type_name.
+    let config_modules = runner.config.modules();
+
+    for s in suggestions {
+        // Find the module in the config that matches this model
+        let module_json_idx = config_modules
+            .iter()
+            .position(|m| m.params.model_type_name == s.model_name);
+
+        if let Some(idx) = module_json_idx {
+            if idx < modules {
+                // Navigate safely with get_mut to avoid creating null entries
+                let params = root
+                    .get_mut("global")
+                    .and_then(|g| g.get_mut("formulations"))
+                    .and_then(|f| f.get_mut(0))
+                    .and_then(|f| f.get_mut("params"))
+                    .and_then(|p| p.get_mut("modules"))
+                    .and_then(|m| m.get_mut(idx))
+                    .and_then(|m| m.get_mut("params"));
+
+                if let Some(params) = params {
+                    // Create variables_names_map if it doesn't exist
+                    if !params.get("variables_names_map").is_some_and(|v| v.is_object()) {
+                        params.as_object_mut().unwrap().insert(
+                            "variables_names_map".to_string(),
+                            serde_json::Value::Object(serde_json::Map::new()),
+                        );
+                    }
+                    if let Some(map) = params
+                        .get_mut("variables_names_map")
+                        .and_then(|v| v.as_object_mut())
+                    {
+                        map.insert(
+                            s.model_input.clone(),
+                            serde_json::Value::String(s.suggested_source.clone()),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    let updated =
+        serde_json::to_string_pretty(&root).map_err(|e| BmiError::FunctionFailed {
+            model: "config".into(),
+            func: format!("Failed to serialize: {}", e),
+        })?;
+    fs::write(realization, updated).map_err(|e| BmiError::FunctionFailed {
+        model: "config".into(),
+        func: format!("Failed to write {}: {}", realization.display(), e),
+    })?;
+
+    Ok(())
+}
+
 fn run_worker(
     realization: &PathBuf,
     locations: &[String],
     output_path: &PathBuf,
 ) -> Result<(), BmiError> {
     let mut runner = ModelRunner::from_config(realization)?;
+    runner.suppress_warnings = true;
     let start_epoch = bmi_driver::parse_datetime(&runner.config.time.start_time)?;
     let interval = runner.config.time.output_interval;
     let output_vars: Vec<String> = runner
