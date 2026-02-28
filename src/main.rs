@@ -28,6 +28,10 @@ struct Args {
     /// Print all unit conversion info and exit without running
     #[arg(long)]
     units: bool,
+
+    /// Minify realization.json, removing fields bmi-driver doesn't use
+    #[arg(long)]
+    minify: bool,
 }
 
 fn main() -> Result<(), BmiError> {
@@ -35,6 +39,14 @@ fn main() -> Result<(), BmiError> {
     let data_dir = fs::canonicalize(&args.data_dir).unwrap();
     let config_dir = data_dir.join("config");
     let _ = env::set_current_dir(&data_dir);
+
+    let realization = config_dir.join("realization.json");
+
+    if args.minify {
+        bmi_driver::config::minify_file(&realization)?;
+        eprintln!("Minified {}", realization.display());
+        return Ok(());
+    }
 
     preload_dependencies();
 
@@ -45,8 +57,6 @@ fn main() -> Result<(), BmiError> {
         .find(|entry| entry.path().extension().map_or(false, |ext| ext == "gpkg"))
         .unwrap()
         .path();
-
-    let realization = config_dir.join("realization.json");
 
     let conn = rusqlite::Connection::open(&db_path).unwrap();
     let mut stmt = conn.prepare("SELECT divide_id FROM 'divides'").unwrap();

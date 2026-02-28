@@ -8,7 +8,7 @@ use crate::error::{BmiError, BmiResult};
 pub struct RealizationConfig {
     pub global: GlobalConfig,
     pub time: TimeConfig,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub output_root: String,
 }
 
@@ -41,24 +41,25 @@ pub struct FormulationConfig {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FormulationParams {
+    #[serde(default, skip_serializing)]
     pub name: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub model_type_name: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub main_output_variable: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub output_variables: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub modules: Vec<ModuleConfig>,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub library_file: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub init_config: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub registration_function: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub variables_names_map: HashMap<String, String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub model_params: HashMap<String, f64>,
 }
 
@@ -70,27 +71,27 @@ pub struct ModuleConfig {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ModuleParams {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub model_type_name: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub library_file: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub init_config: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub registration_function: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub main_output_variable: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub variables_names_map: HashMap<String, String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub model_params: HashMap<String, serde_json::Value>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub python_type: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub allow_exceed_end_time: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub fixed_time_step: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub uses_forcing_file: bool,
 }
 
@@ -163,6 +164,15 @@ impl RealizationConfig {
     pub fn main_output(&self) -> Option<&str> {
         self.global.formulations.first().map(|f| f.params.main_output_variable.as_str())
     }
+}
+
+pub fn minify_file(path: &Path) -> BmiResult<()> {
+    let config = RealizationConfig::from_file(path)?;
+    let json = serde_json::to_string_pretty(&config)
+        .map_err(|e| BmiError::FunctionFailed { model: "config".into(), func: format!("serialize: {}", e) })?;
+    fs::write(path, json)
+        .map_err(|e| BmiError::FunctionFailed { model: "config".into(), func: format!("write {}: {}", path.display(), e) })?;
+    Ok(())
 }
 
 pub fn parse_datetime(s: &str) -> BmiResult<i64> {
