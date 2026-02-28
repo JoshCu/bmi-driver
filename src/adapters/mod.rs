@@ -1,11 +1,15 @@
 mod c;
 #[cfg(feature = "fortran")]
 mod fortran;
+#[cfg(feature = "python")]
+mod python;
 mod sloth;
 
 pub use c::BmiC;
 #[cfg(feature = "fortran")]
 pub use fortran::BmiFortran;
+#[cfg(feature = "python")]
+pub use python::BmiPython;
 pub use sloth::BmiSloth;
 
 use crate::error::{BmiError, BmiResult};

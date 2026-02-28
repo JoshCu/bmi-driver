@@ -125,6 +125,8 @@ pub enum BmiAdapterType {
     C,
     #[cfg(feature = "fortran")]
     Fortran,
+    #[cfg(feature = "python")]
+    Python,
 }
 
 impl BmiAdapterType {
@@ -133,6 +135,8 @@ impl BmiAdapterType {
             "bmi_c" => Some(Self::C),
             #[cfg(feature = "fortran")]
             "bmi_fortran" => Some(Self::Fortran),
+            #[cfg(feature = "python")]
+            "bmi_python" => Some(Self::Python),
             _ => None,
         }
     }
