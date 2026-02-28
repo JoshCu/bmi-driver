@@ -12,6 +12,8 @@ pub mod units;
 pub use adapters::BmiC;
 #[cfg(feature = "fortran")]
 pub use adapters::BmiFortran;
+#[cfg(feature = "python")]
+pub use adapters::BmiPython;
 pub use adapters::BmiSloth;
 pub use config::{parse_datetime, BmiAdapterType, ModuleConfig, RealizationConfig};
 pub use error::{BmiError, BmiResult};

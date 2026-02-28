@@ -4,6 +4,8 @@ use std::path::Path;
 use crate::adapters::{BmiC, BmiSloth};
 #[cfg(feature = "fortran")]
 use crate::adapters::BmiFortran;
+#[cfg(feature = "python")]
+use crate::adapters::BmiPython;
 use crate::config::{parse_datetime, BmiAdapterType, ModuleConfig, RealizationConfig};
 use crate::error::{BmiError, BmiResult};
 use crate::forcings::{Forcings, NetCdfForcings};
@@ -183,6 +185,22 @@ impl ModelRunner {
                             "register_bmi",
                         )?)
                     }
+                }
+                #[cfg(feature = "python")]
+                BmiAdapterType::Python => {
+                    let class = if module.params.registration_function.is_empty() {
+                        return Err(BmiError::FunctionFailed {
+                            model: module.params.model_type_name.clone(),
+                            func: "bmi_python requires registration_function to be set to the Python class name".into(),
+                        });
+                    } else {
+                        &module.params.registration_function
+                    };
+                    Box::new(BmiPython::load(
+                        &module.params.model_type_name,
+                        &module.params.library_file,
+                        class,
+                    )?)
                 }
             }
         };
