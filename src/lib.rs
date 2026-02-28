@@ -9,7 +9,10 @@ pub mod runner;
 mod traits;
 pub mod units;
 
-pub use adapters::{BmiC, BmiFortran, BmiSloth};
+pub use adapters::BmiC;
+#[cfg(feature = "fortran")]
+pub use adapters::BmiFortran;
+pub use adapters::BmiSloth;
 pub use config::{parse_datetime, BmiAdapterType, ModuleConfig, RealizationConfig};
 pub use error::{BmiError, BmiResult};
 pub use forcings::{Forcings, NetCdfForcings};

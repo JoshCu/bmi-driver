@@ -8,6 +8,9 @@ authors = ["Claude","Josh Cu"]
 repository = "https://github.com/JoshCu/bmi-driver"
 readme = "README.md"
 
+[features]
+fortran = []
+
 [dependencies]
 thiserror = "1.0"
 serde = { version = "1.0", features = ["derive"] }

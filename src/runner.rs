@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::adapters::{BmiC, BmiFortran, BmiSloth};
+use crate::adapters::{BmiC, BmiSloth};
+#[cfg(feature = "fortran")]
+use crate::adapters::BmiFortran;
 use crate::config::{parse_datetime, BmiAdapterType, ModuleConfig, RealizationConfig};
 use crate::error::{BmiError, BmiResult};
 use crate::forcings::{Forcings, NetCdfForcings};
@@ -40,6 +42,7 @@ pub struct ModelRunner {
     pub models: Vec<ModelInstance>,
     pub total_steps: usize,
     pub location_id: String,
+    #[cfg(feature = "fortran")]
     pub fortran_middleware: Option<String>,
     pub outputs: HashMap<String, Vec<f64>>,
     pub final_outputs: Vec<f64>,
@@ -60,6 +63,7 @@ impl ModelRunner {
             models: Vec::new(),
             total_steps: 0,
             location_id: String::new(),
+            #[cfg(feature = "fortran")]
             fortran_middleware: None,
             outputs: HashMap::new(),
             final_outputs: Vec::new(),
@@ -68,6 +72,7 @@ impl ModelRunner {
         })
     }
 
+    #[cfg(feature = "fortran")]
     pub fn set_fortran_middleware(&mut self, path: impl Into<String>) {
         self.fortran_middleware = Some(path.into());
     }
@@ -162,6 +167,7 @@ impl ModelRunner {
                         reg,
                     )?)
                 }
+                #[cfg(feature = "fortran")]
                 BmiAdapterType::Fortran => {
                     if let Some(ref mw) = self.fortran_middleware {
                         Box::new(BmiFortran::load(

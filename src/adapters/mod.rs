@@ -1,8 +1,10 @@
 mod c;
+#[cfg(feature = "fortran")]
 mod fortran;
 mod sloth;
 
 pub use c::BmiC;
+#[cfg(feature = "fortran")]
 pub use fortran::BmiFortran;
 pub use sloth::BmiSloth;
 

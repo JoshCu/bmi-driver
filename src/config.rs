@@ -121,12 +121,17 @@ impl ModuleParams {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BmiAdapterType { C, Fortran }
+pub enum BmiAdapterType {
+    C,
+    #[cfg(feature = "fortran")]
+    Fortran,
+}
 
 impl BmiAdapterType {
     pub fn from_name(name: &str) -> Option<Self> {
         match name.to_lowercase().as_str() {
             "bmi_c" => Some(Self::C),
+            #[cfg(feature = "fortran")]
             "bmi_fortran" => Some(Self::Fortran),
             _ => None,
         }
