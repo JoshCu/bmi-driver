@@ -1,4 +1,4 @@
-use bmi_driver::{preload_dependencies, Bmi, BmiError, ModelRunner};
+use bmi_driver::{preload_dependencies, BmiError, ModelRunner};
 use clap::Parser;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::env;
@@ -8,6 +8,39 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::thread;
 
+#[derive(Debug, Clone, Copy, clap::ValueEnum, serde::Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+enum ProgressMode {
+    /// One progress bar per worker plus overall total
+    Full,
+    /// Single overall progress bar only
+    Summary,
+    /// No progress output
+    None,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct TomlConfig {
+    jobs: Option<usize>,
+    progress: Option<ProgressMode>,
+}
+
+fn load_toml_config() -> TomlConfig {
+    let config_path = dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("~/.config"))
+        .join("bmi-driver")
+        .join("config.toml");
+
+    if let Ok(contents) = fs::read_to_string(&config_path) {
+        toml::from_str(&contents).unwrap_or_else(|e| {
+            eprintln!("Warning: failed to parse {}: {}", config_path.display(), e);
+            TomlConfig::default()
+        })
+    } else {
+        TomlConfig::default()
+    }
+}
+
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
@@ -16,6 +49,10 @@ struct Args {
     /// Number of parallel worker processes (default: number of CPUs)
     #[arg(short = 'j', long)]
     jobs: Option<usize>,
+
+    /// Progress bar display mode
+    #[arg(long, value_enum)]
+    progress: Option<ProgressMode>,
 
     /// Internal: start index for worker mode (inclusive)
     #[arg(long, hide = true)]
@@ -69,11 +106,19 @@ fn main() -> Result<(), BmiError> {
         return print_units(&realization, &locations);
     }
 
+    // Merge: CLI > TOML > default
+    let toml_cfg = load_toml_config();
+    let jobs = args.jobs.or(toml_cfg.jobs);
+    let progress = args
+        .progress
+        .or(toml_cfg.progress)
+        .unwrap_or(ProgressMode::Summary);
+
     if let (Some(start), Some(end)) = (args.worker_start, args.worker_end) {
         let output_path = data_dir.join("outputs").join("bmi-driver");
         run_worker(&realization, &locations[start..end], &output_path)
     } else {
-        run_parent(&data_dir, &realization, &locations, args.jobs)
+        run_parent(&data_dir, &realization, &locations, jobs, progress)
     }
 }
 
@@ -94,6 +139,7 @@ fn run_parent(
     realization: &PathBuf,
     locations: &[String],
     jobs: Option<usize>,
+    progress: ProgressMode,
 ) -> Result<(), BmiError> {
     // Check for missing mappings and print active unit conversions
     {
@@ -158,23 +204,33 @@ fn run_parent(
 
     let mp = MultiProgress::new();
 
-    // Overall progress bar at the top
-    let overall_pb = mp.add(ProgressBar::new(n_locations as u64));
-    overall_pb.set_style(
-        ProgressStyle::with_template(
-            "{spinner:.green} [{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} ({per_sec}) {msg}",
-        )
-        .unwrap()
-        .progress_chars("━╸─"),
-    );
-    overall_pb.enable_steady_tick(std::time::Duration::from_millis(100));
-    overall_pb.set_message("total");
-
-    // Per-worker style
-    let worker_style =
-        ProgressStyle::with_template("  worker {msg}: {bar:30.white/black} {pos}/{len}")
+    // Overall progress bar (shown for Full and Summary)
+    let overall_pb = if progress != ProgressMode::None {
+        let pb = mp.add(ProgressBar::new(n_locations as u64));
+        pb.set_style(
+            ProgressStyle::with_template(
+                "{spinner:.green} [{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} ({per_sec}) {msg}",
+            )
             .unwrap()
-            .progress_chars("━╸─");
+            .progress_chars("━╸─"),
+        );
+        pb.enable_steady_tick(std::time::Duration::from_millis(100));
+        pb.set_message("total");
+        Some(pb)
+    } else {
+        None
+    };
+
+    // Per-worker style (only used in Full mode)
+    let worker_style = if progress == ProgressMode::Full {
+        Some(
+            ProgressStyle::with_template("  worker {msg}: {bar:30.white/black} {pos}/{len}")
+                .unwrap()
+                .progress_chars("━╸─"),
+        )
+    } else {
+        None
+    };
 
     let mut handles = Vec::new();
 
@@ -200,9 +256,12 @@ fn run_parent(
                 func: format!("Failed to spawn worker: {}", e),
             })?;
 
-        let worker_pb = mp.add(ProgressBar::new(worker_count));
-        worker_pb.set_style(worker_style.clone());
-        worker_pb.set_message(format!("{}", i));
+        let worker_pb = worker_style.as_ref().map(|style| {
+            let pb = mp.add(ProgressBar::new(worker_count));
+            pb.set_style(style.clone());
+            pb.set_message(format!("{}", i));
+            pb
+        });
 
         let stdout = child.stdout.take().unwrap();
         let overall_pb = overall_pb.clone();
@@ -213,12 +272,18 @@ fn run_parent(
             for line in reader.lines().flatten() {
                 if let Ok(count) = line.trim().parse::<u64>() {
                     let delta = count - prev;
-                    worker_pb.inc(delta);
-                    overall_pb.inc(delta);
+                    if let Some(pb) = &worker_pb {
+                        pb.inc(delta);
+                    }
+                    if let Some(pb) = &overall_pb {
+                        pb.inc(delta);
+                    }
                     prev = count;
                 }
             }
-            worker_pb.finish_and_clear();
+            if let Some(pb) = worker_pb {
+                pb.finish_and_clear();
+            }
             child.wait()
         });
         handles.push(handle);
@@ -244,14 +309,18 @@ fn run_parent(
     }
 
     if failed {
-        overall_pb.finish_with_message("failed");
+        if let Some(pb) = &overall_pb {
+            pb.finish_with_message("failed");
+        }
         return Err(BmiError::FunctionFailed {
             model: "runner".into(),
             func: "One or more workers failed".into(),
         });
     }
 
-    overall_pb.finish_with_message("done ✓");
+    if let Some(pb) = &overall_pb {
+        pb.finish_with_message("done ✓");
+    }
     Ok(())
 }
 
