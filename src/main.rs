@@ -69,6 +69,14 @@ struct Args {
     /// Minify realization.json, removing fields bmi-driver doesn't use
     #[arg(long)]
     minify: bool,
+
+    /// Index of the first location to process on this node (for SLURM/multi-node use)
+    #[arg(long, default_value_t = 0)]
+    node_start: usize,
+
+    /// Number of locations to process on this node (0 = all remaining, for SLURM/multi-node use)
+    #[arg(long, default_value_t = 0)]
+    node_count: usize,
 }
 
 fn main() -> Result<(), BmiError> {
@@ -101,6 +109,17 @@ fn main() -> Result<(), BmiError> {
         .query_map([], |row| Ok(row.get::<_, String>(0)?))
         .unwrap();
     let locations: Vec<String> = rows.flatten().collect();
+
+    // Apply node-level partitioning for multi-node / SLURM job-array use.
+    // --node-start and --node-count carve out this node's slice of the location list
+    // before the internal worker processes further sub-divide it with -j.
+    let node_start = args.node_start.min(locations.len());
+    let node_end = if args.node_count > 0 {
+        (node_start + args.node_count).min(locations.len())
+    } else {
+        locations.len()
+    };
+    let locations = locations[node_start..node_end].to_vec();
 
     if args.units {
         return print_units(&realization, &locations);
