@@ -2,63 +2,61 @@
 
 A parallel BMI (Basic Model Interface) orchestrator that dynamically loads and couples C, Fortran, and Python hydrological models. It reads NetCDF forcing data, resolves model dependencies, handles automatic unit conversion, and runs across many geographic locations in parallel.
 
-The binary is named `bmi-runner`.
+The binary is named `bmi-driver`.
 
 ## Building
 
-### Default (C adapter only)
+### Default (all adapters)
 
 ```bash
 cargo build --release
 ```
 
-This builds with support for C shared library models and the built-in SLOTH dummy model.
+By default this builds with C, Fortran, and Python adapter support. The build will check for required system libraries and print clear install instructions if anything is missing.
 
-### With Fortran support
-
-```bash
-cargo build --release --features fortran
-```
-
-Enables the `bmi_fortran` adapter for loading Fortran shared libraries. No additional build dependencies are required; a Fortran runtime must be available at execution time.
-
-### With Python support
+### C adapter only
 
 ```bash
-cargo build --release --features python
+cargo build --release --no-default-features
 ```
 
-Enables the `bmi_python` adapter for loading Python BMI models via [PyO3](https://pyo3.rs). Requires Python development headers at build time (e.g., `python3-dev`). The Python environment must have the target BMI packages installed at runtime.
+Builds with only the C shared library adapter and the built-in SLOTH dummy model. This has the fewest system dependencies (only `libnetcdf`).
 
-### All features
+### Selecting features
 
 ```bash
-cargo build --release --features fortran,python
+cargo build --release --no-default-features --features fortran
+cargo build --release --no-default-features --features python
+cargo build --release --no-default-features --features fortran,python
 ```
+
+- **`fortran`** -- Enables the `bmi_fortran` adapter for loading Fortran shared libraries. No additional build dependencies; a Fortran runtime must be available at execution time.
+- **`python`** -- Enables the `bmi_python` adapter for loading Python BMI models via [PyO3](https://pyo3.rs). Requires Python development headers at build time (e.g., `python3-dev`). The Python environment must have the target BMI packages installed at runtime.
 
 ### Install
 
 ```bash
-cargo install --path . --features fortran,python
+cargo install --path .
 ```
 
-This installs `bmi-runner` to `~/.cargo/bin/`.
+This installs `bmi-driver` to `~/.cargo/bin/`.
 
 ### System dependencies
 
-| Library | Purpose |
-|---------|---------|
-| `libnetcdf` | Reading NetCDF forcing files |
-| `libsqlite3` | Reading location IDs from GeoPackage (.gpkg) |
-| `libm` | Math functions for loaded models |
-| Python dev headers | Only if building with `--features python` |
+| Library | Purpose | Install |
+|---------|---------|---------|
+| `libnetcdf` | Reading NetCDF forcing files | `apt install libnetcdf-dev` / `dnf install netcdf-devel` / `brew install netcdf` |
+| `pkg-config` | Library discovery at build time | `apt install pkg-config` / `dnf install pkgconfig` / `brew install pkg-config` |
+| Python dev headers | Only with `python` feature (default) | `apt install python3-dev` / `dnf install python3-devel` / `brew install python3` |
+
+SQLite is bundled and compiled from source automatically -- no system `libsqlite3` package is needed.
 
 Model shared libraries (`.so`) must be accessible at the paths specified in the config.
 
 ## Usage
 
 ```
-bmi-runner <data_dir> [OPTIONS]
+bmi-driver <data_dir> [OPTIONS]
 ```
 
 ### Options
@@ -374,7 +372,7 @@ All of these are recognized as equivalent:
 Use `--units` to print all active conversions for debugging:
 
 ```bash
-bmi-runner <data_dir> --units
+bmi-driver <data_dir> --units
 ```
 
 If units are unknown or incompatible, the runner falls back to an identity conversion (no change) and prints a warning.
@@ -411,7 +409,7 @@ Answering `y` updates the config file in place.
 Use `--minify` to strip a realization.json down to only the fields bmi-driver reads:
 
 ```bash
-bmi-runner <data_dir> --minify
+bmi-driver <data_dir> --minify
 ```
 
 This removes:
@@ -449,7 +447,7 @@ Columns are determined by `output_variables` in the formulation params. If `outp
 
 ```
 src/
-├── main.rs          # CLI entry point (bmi-runner binary)
+├── main.rs          # CLI entry point (bmi-driver binary)
 ├── lib.rs           # Public exports
 ├── traits.rs        # Bmi trait and types
 ├── error.rs         # Error types
