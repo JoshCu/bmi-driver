@@ -9,6 +9,44 @@ use crate::library::GlobalLibrary;
 use crate::traits::{parse_time_units, Bmi, VarType};
 use super::{check_initialized, cstr_to_string};
 
+/// BMI adapter for C shared libraries.
+///
+/// Loads a C `.so` via `dlopen` with `RTLD_GLOBAL`, calls a registration function to populate a
+/// [`crate::ffi::Bmi`] struct of function pointers, then dispatches all BMI calls through those
+/// pointers.
+///
+/// ## BMI functions called
+///
+/// **Lifecycle** — called once per simulation:
+/// - `initialize` — passes the config path as a `*const c_char`.
+/// - `finalize` — called on drop if the model was successfully initialized.
+///
+/// **Per-timestep** — called inside the simulation loop:
+/// - `update` — advance the model by one timestep.
+/// - `get_value` — retrieve output values via a type-erased `*mut c_void` buffer. The adapter
+///   calls `get_var_nbytes` first to size the buffer, then passes the raw pointer to the single
+///   C `get_value` function pointer; all three Rust variants (`get_value_f64`, `get_value_f32`,
+///   `get_value_i32`) share this one pointer.
+/// - `set_value` — push input values via a type-erased `*mut c_void`; same single pointer for
+///   all three Rust typed variants.
+///
+/// **After `initialize`** (setup, not repeated per timestep):
+/// - `get_time_units` — used to compute the internal `time_factor`.
+/// - `get_input_var_names` / `get_output_var_names` (preceded by `get_input_item_count` /
+///   `get_output_item_count` to allocate buffers) — together with `get_var_type` and
+///   `get_var_itemsize` for each variable, to populate the type cache.
+///
+/// **On demand** (e.g. from the runner or `BmiExt`):
+/// - `update_until`, `get_component_name`, `get_var_grid`, `get_var_units`, `get_var_nbytes`,
+///   `get_var_location`, `get_current_time`, `get_start_time`, `get_end_time`, `get_time_step`,
+///   `get_grid_rank`, `get_grid_size`, `get_grid_type`.
+///
+/// ## Functions NOT called
+///
+/// The C FFI struct contains optional pointers for `get_value_ptr`, `get_value_at_indices`,
+/// `set_value_at_indices`, and all extended grid functions (`get_grid_shape`, `get_grid_x`, …).
+/// None of these are wrapped by the Rust [`crate::traits::Bmi`] trait so the driver never calls
+/// them, but they may be populated by the model library.
 pub struct BmiC {
     name: String,
     _library: GlobalLibrary,

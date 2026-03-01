@@ -61,6 +61,50 @@ struct FortranFns {
     get_grid_type: GridTypeFn,
 }
 
+/// BMI adapter for Fortran shared libraries.
+///
+/// Supports two loading modes:
+/// - **With middleware**: loads both a model `.so` and a separate C-to-Fortran middleware `.so`.
+///   BMI function symbols are resolved from the middleware library.
+/// - **Single library** (`load_single`): one `.so` provides both the registration function and all
+///   BMI symbols.
+///
+/// An opaque handle (obtained from the registration function) is passed as the first argument to
+/// every BMI call, matching the convention used by Fortran BMI implementations.
+///
+/// ## BMI functions called
+///
+/// **All 29 BMI functions are resolved at load time** and must be present in the library;
+/// unlike `BmiC`, none are optional. They are stored in an internal `FortranFns` struct of typed
+/// function pointers.
+///
+/// **Lifecycle** — called once per simulation:
+/// - `initialize` — passes the config path as `*const c_char`.
+/// - `finalize` — called on drop if the model was successfully initialized.
+///
+/// **Per-timestep** — called inside the simulation loop:
+/// - `update` — advance the model by one timestep.
+/// - `get_value_double` / `get_value_float` / `get_value_int` — typed function pointers (unlike
+///   the C adapter's single type-erased pointer). The adapter calls `get_var_nbytes` first to
+///   determine how many elements to allocate.
+/// - `set_value_double` / `set_value_float` / `set_value_int` — typed function pointers.
+///
+/// **After `initialize`** (setup):
+/// - `get_time_units` — to compute the internal `time_factor`.
+/// - `get_input_item_count` / `get_output_item_count` → `get_input_var_names` /
+///   `get_output_var_names` → `get_var_type` + `get_var_itemsize` (per variable) — type cache.
+///
+/// **On demand**:
+/// - `update_until` — note: passes time by pointer (`*mut c_double`) rather than by value, per
+///   Fortran convention.
+/// - `get_component_name`, `get_var_grid`, `get_var_units`, `get_var_nbytes`,
+///   `get_var_location`, `get_current_time`, `get_start_time`, `get_end_time`, `get_time_step`,
+///   `get_grid_rank`, `get_grid_size`, `get_grid_type`.
+///
+/// ## Functions NOT called
+///
+/// `get_value_ptr`, `get_value_at_indices`, `set_value_at_indices`, and all extended grid
+/// functions are not part of the `FortranFns` struct and are never loaded or called.
 pub struct BmiFortran {
     model_name: String,
     _model_lib: GlobalLibrary,
