@@ -1,8 +1,8 @@
 [package]
 name = "bmi-driver"
-version = "0.0.0"
+version = "0.0.1"
 edition = "2021"
-description = "Basic Model Interface (BMI) driver with support for C and Fortran models."
+description = "Basic Model Interface (BMI) driver with support for C Fortran, and Python models."
 license = "MIT"
 authors = ["Claude","Josh Cu"]
 repository = "https://github.com/JoshCu/bmi-driver"
@@ -26,5 +26,6 @@ toml = "0.8"
 dirs = "5"
 
 [[bin]]
-name = "bmi-runner"
+default = ["fortran", "python"]
+name = "bmi-driver"
 path = "src/main.rs"
