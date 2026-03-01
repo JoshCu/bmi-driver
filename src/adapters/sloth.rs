@@ -13,50 +13,6 @@ struct SlothVar {
     value: f64,
 }
 
-/// Built-in dummy BMI model (SLOTH — Simple Lightweight Output Testing Handler).
-///
-/// Activated when `model_type_name` is `"SLOTH"` under the `bmi_c++` adapter name. No external
-/// shared library is required; everything is implemented in pure Rust.
-///
-/// Variables are declared at `configure()` time via `model_params` entries with the format
-/// `"name(count,type,units,location)": value`. Each variable returns its configured constant value
-/// for every timestep; `set_value` stores only the first element of the input slice.
-///
-/// ## BMI functions implemented
-///
-/// All functions defined in the [`crate::traits::Bmi`] trait are implemented with fixed or
-/// trivially-computed return values:
-///
-/// | Function | Return value |
-/// |---|---|
-/// | `initialize` | sets `current_time = 0.0`; ignores the config path |
-/// | `update` | increments `current_time` by `time_step` (default 3600 s) |
-/// | `update_until` | sets `current_time = time` |
-/// | `finalize` | clears the `initialized` flag |
-/// | `get_component_name` | `"SLOTH (<name>)"` |
-/// | `get_input_item_count` | always `0` |
-/// | `get_output_item_count` | number of configured variables |
-/// | `get_input_var_names` | always empty |
-/// | `get_output_var_names` | names of configured variables |
-/// | `get_var_grid` | always `0` |
-/// | `get_var_type` | configured type string (`"double"`, `"float"`, `"int"`, …) |
-/// | `get_var_units` | configured units string |
-/// | `get_var_itemsize` | `8` for double, `4` for float/int |
-/// | `get_var_nbytes` | `count × itemsize` |
-/// | `get_var_location` | configured location string (e.g. `"node"`) |
-/// | `get_current_time` | current simulation time in seconds |
-/// | `get_start_time` | always `0.0` |
-/// | `get_end_time` | always `f64::MAX` |
-/// | `get_time_units` | always `"s"` |
-/// | `get_time_step` | `3600.0` (1 hour) |
-/// | `get_value_f64/f32/i32` | `vec![value; count]` cast to the requested type |
-/// | `set_value_f64/f32/i32` | stores `values[0]` into the variable (silently ignores unknown names) |
-/// | `get_grid_rank` | always `1` |
-/// | `get_grid_size` | always `1` |
-/// | `get_grid_type` | always `"scalar"` |
-///
-/// Because `get_time_units` always returns `"s"`, the `time_factor` for this adapter is always
-/// `1.0` (no time-unit conversion needed).
 pub struct BmiSloth {
     name: String,
     initialized: bool,
