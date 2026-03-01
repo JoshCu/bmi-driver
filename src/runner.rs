@@ -188,19 +188,27 @@ impl ModelRunner {
                 }
                 #[cfg(feature = "python")]
                 BmiAdapterType::Python => {
-                    let class = if module.params.registration_function.is_empty() {
+                    if !module.params.python_type.is_empty() {
+                        Box::new(BmiPython::load_from_type(
+                            &module.params.model_type_name,
+                            &module.params.python_type,
+                        )?)
+                    } else if !module.params.library_file.is_empty()
+                        && !module.params.registration_function.is_empty()
+                    {
+                        Box::new(BmiPython::load(
+                            &module.params.model_type_name,
+                            &module.params.library_file,
+                            &module.params.registration_function,
+                        )?)
+                    } else {
                         return Err(BmiError::FunctionFailed {
                             model: module.params.model_type_name.clone(),
-                            func: "bmi_python requires registration_function to be set to the Python class name".into(),
+                            func: "bmi_python requires either 'python_type' (e.g. \"lstm.bmi_lstm.bmi_LSTM\") \
+                                   or both 'library_file' and 'registration_function'"
+                                .into(),
                         });
-                    } else {
-                        &module.params.registration_function
-                    };
-                    Box::new(BmiPython::load(
-                        &module.params.model_type_name,
-                        &module.params.library_file,
-                        class,
-                    )?)
+                    }
                 }
             }
         };
