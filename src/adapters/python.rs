@@ -7,7 +7,7 @@ use crate::error::{BmiError, BmiResult};
 use crate::traits::{parse_time_units, Bmi, VarType};
 use super::check_initialized;
 
-/// A BMI adapter that drives any Python class implementing the BMI interface.
+/// BMI adapter for Python classes implementing the BMI interface.
 ///
 /// Two loading modes are supported:
 ///
@@ -21,6 +21,42 @@ use super::check_initialized;
 ///    This matches the ngen `python_type` realization convention.
 ///
 /// The class is instantiated with no arguments; `initialize(config)` is called separately.
+///
+/// ## BMI functions called
+///
+/// Python method names match BMI function names exactly, with two notable exceptions for value
+/// exchange (see below). All calls acquire the GIL via PyO3.
+///
+/// **Lifecycle** — called once per simulation:
+/// - `initialize(config)` — passes the config path as a Python string.
+/// - `finalize()` — called on drop if the model was successfully initialized.
+///
+/// **Per-timestep** — called inside the simulation loop:
+/// - `update()` — advance the model by one timestep.
+/// - `get_value_ptr(name)` followed by `.tolist()` — **not** `get_value`. Using `get_value_ptr`
+///   returns a numpy array whose `.tolist()` converts elements to native Python types that PyO3
+///   can extract as `Vec<T>` without requiring the numpy crate. The adapter does **not** call
+///   `get_var_nbytes`; Python manages the buffer.
+/// - `set_value(name, arr)` — the driver converts the Rust slice to a numpy array via
+///   `numpy.array(values)` then calls `set_value` with that array.
+///
+/// **After `initialize`** (setup):
+/// - `get_time_units()` — to compute the internal `time_factor`.
+/// - `get_input_var_names()` / `get_output_var_names()` → `get_var_type(name)` +
+///   `get_var_itemsize(name)` (per variable) — type cache. Note: `get_input_item_count` and
+///   `get_output_item_count` are NOT called here; Python returns the full list directly.
+///
+/// **On demand**:
+/// - `update_until(time)`, `get_component_name()`, `get_input_item_count()`,
+///   `get_output_item_count()`, `get_var_grid(name)`, `get_var_units(name)`,
+///   `get_var_nbytes(name)`, `get_var_location(name)`, `get_current_time()`, `get_start_time()`,
+///   `get_end_time()`, `get_time_step()`, `get_grid_rank(grid)`, `get_grid_size(grid)`,
+///   `get_grid_type(grid)`.
+///
+/// ## Functions NOT called
+///
+/// `get_value` (plain, non-ptr variant), `get_value_at_indices`, `set_value_at_indices`, and all
+/// extended grid functions are never invoked by this adapter.
 pub struct BmiPython {
     model_name: String,
     obj: PyObject,

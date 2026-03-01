@@ -1,3 +1,6 @@
+//! BMI adapter implementations. See `bmi_functions.md` in this directory for a table of which
+//! BMI functions each adapter calls.
+
 mod c;
 #[cfg(feature = "fortran")]
 mod fortran;
