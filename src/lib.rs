@@ -5,6 +5,7 @@ mod error;
 pub mod ffi;
 mod forcings;
 mod library;
+pub mod output_netcdf;
 mod resample;
 pub mod runner;
 mod traits;
@@ -16,7 +17,7 @@ pub use adapters::BmiFortran;
 #[cfg(feature = "python")]
 pub use adapters::BmiPython;
 pub use adapters::BmiSloth;
-pub use config::{parse_datetime, BmiAdapterType, DownsampleMode, ModuleConfig, RealizationConfig, UpsampleMode};
+pub use config::{parse_datetime, BmiAdapterType, DownsampleMode, ModuleConfig, OutputFormat, RealizationConfig, UpsampleMode};
 pub use error::{BmiError, BmiResult};
 pub use forcings::{Forcings, NetCdfForcings};
 pub use library::preload_dependencies;

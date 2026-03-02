@@ -1,4 +1,4 @@
-use bmi_driver::{preload_dependencies, BmiError, ModelRunner};
+use bmi_driver::{preload_dependencies, BmiError, ModelRunner, OutputFormat};
 use clap::Parser;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::env;
@@ -161,8 +161,10 @@ fn run_parent(
     progress: ProgressMode,
 ) -> Result<(), BmiError> {
     // Check for missing mappings and print active unit conversions
+    let output_format;
     {
         let mut runner = ModelRunner::from_config(realization)?;
+        output_format = runner.config.output_format;
         if let Some(loc) = locations.first() {
             runner.initialize(loc)?;
 
@@ -340,6 +342,26 @@ fn run_parent(
     if let Some(pb) = &overall_pb {
         pb.finish_with_message("done ✓");
     }
+
+    // Merge per-worker NetCDF files into a single output file
+    if output_format == OutputFormat::Netcdf {
+        let mut worker_files = Vec::new();
+        for i in 0..n_workers {
+            let start = i * chunk_size;
+            if start >= n_locations {
+                break;
+            }
+            let first_loc = &locations[start];
+            let tmp_path = output_path.join(format!("tmp_{}.nc", first_loc));
+            if tmp_path.exists() {
+                worker_files.push(tmp_path);
+            }
+        }
+        if !worker_files.is_empty() {
+            let final_path = output_path.join("results.nc");
+            bmi_driver::output_netcdf::merge_netcdf_files(&worker_files, &final_path)?;
+        }
+    }
     Ok(())
 }
 
@@ -432,6 +454,7 @@ fn run_worker(
     runner.suppress_warnings = true;
     let start_epoch = bmi_driver::parse_datetime(&runner.config.time.start_time)?;
     let interval = runner.config.time.output_interval;
+    let output_format = runner.config.output_format;
     let output_vars: Vec<String> = runner
         .config
         .global
@@ -442,6 +465,25 @@ fn run_worker(
 
     let report_interval = ((locations.len() as f64) * 0.01).ceil().max(1.0) as usize;
 
+    match output_format {
+        OutputFormat::Csv => {
+            run_worker_csv(&mut runner, locations, output_path, &output_vars, start_epoch, interval, report_interval)
+        }
+        OutputFormat::Netcdf => {
+            run_worker_netcdf(&mut runner, locations, output_path, &output_vars, report_interval)
+        }
+    }
+}
+
+fn run_worker_csv(
+    runner: &mut ModelRunner,
+    locations: &[String],
+    output_path: &PathBuf,
+    output_vars: &[String],
+    start_epoch: i64,
+    interval: i64,
+    report_interval: usize,
+) -> Result<(), BmiError> {
     for (i, location) in locations.iter().enumerate() {
         runner.initialize(location)?;
         runner.run()?;
@@ -488,6 +530,57 @@ fn run_worker(
             println!("{}", i + 1);
         }
     }
+    Ok(())
+}
+
+fn run_worker_netcdf(
+    runner: &mut ModelRunner,
+    locations: &[String],
+    output_path: &PathBuf,
+    output_vars: &[String],
+    report_interval: usize,
+) -> Result<(), BmiError> {
+    use bmi_driver::output_netcdf::{LocationResult, NetCdfWriter};
+
+    // Determine the worker's tmp file name from the first location
+    let tmp_name = if let Some(first) = locations.first() {
+        format!("tmp_{}.nc", first)
+    } else {
+        return Ok(());
+    };
+    let nc_path = output_path.join(&tmp_name);
+
+    let start_time = runner.config.time.start_time.clone();
+    let interval = runner.config.time.output_interval;
+    let total_steps = runner.total_steps;
+
+    let writer = NetCdfWriter::new(nc_path, &start_time, interval, total_steps)?;
+
+    for (i, location) in locations.iter().enumerate() {
+        runner.initialize(location)?;
+        runner.run()?;
+
+        let columns: Vec<(String, Vec<f64>)> = if output_vars.is_empty() {
+            runner.outputs.iter().map(|(name, vals)| (name.clone(), vals.clone())).collect()
+        } else {
+            output_vars.iter().filter_map(|name| {
+                runner.outputs(name).ok().map(|vals| (name.clone(), vals.clone()))
+            }).collect()
+        };
+
+        writer.write(LocationResult {
+            location_id: location.clone(),
+            columns,
+        })?;
+
+        runner.finalize()?;
+
+        if (i + 1) % report_interval == 0 || i + 1 == locations.len() {
+            println!("{}", i + 1);
+        }
+    }
+
+    writer.finish()?;
     Ok(())
 }
 

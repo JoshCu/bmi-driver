@@ -38,12 +38,27 @@ impl Default for UpsampleMode {
     fn default() -> Self { Self::Mean }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutputFormat {
+    Csv,
+    Netcdf,
+}
+
+impl Default for OutputFormat {
+    fn default() -> Self { Self::Csv }
+}
+
+fn is_default_output_format(f: &OutputFormat) -> bool { *f == OutputFormat::Csv }
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RealizationConfig {
     pub global: GlobalConfig,
     pub time: TimeConfig,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub output_root: String,
+    #[serde(default, skip_serializing_if = "is_default_output_format")]
+    pub output_format: OutputFormat,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
