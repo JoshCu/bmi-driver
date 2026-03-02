@@ -4,6 +4,40 @@ use std::fs;
 use std::path::Path;
 use crate::error::{BmiError, BmiResult};
 
+/// How to resample when the source has a coarser timestep than the destination.
+/// Example: daily source feeding an hourly model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DownsampleMode {
+    /// Repeat the source value for all sub-steps (sample-and-hold)
+    Repeat,
+    /// Linearly interpolate between consecutive source values
+    Interpolate,
+}
+
+impl Default for DownsampleMode {
+    fn default() -> Self { Self::Repeat }
+}
+
+/// How to resample when the source has a finer timestep than the destination.
+/// Example: 5-minute source feeding an hourly model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpsampleMode {
+    /// Arithmetic mean of all source values in the window
+    Mean,
+    /// Most frequent value (for categorical/integer data)
+    Mode,
+    /// Minimum value in the window
+    Min,
+    /// Maximum value in the window
+    Max,
+}
+
+impl Default for UpsampleMode {
+    fn default() -> Self { Self::Mean }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RealizationConfig {
     pub global: GlobalConfig,
@@ -93,7 +127,14 @@ pub struct ModuleParams {
     pub fixed_time_step: bool,
     #[serde(default, skip_serializing)]
     pub uses_forcing_file: bool,
+    #[serde(default, skip_serializing_if = "is_default_downsample")]
+    pub downsample_mode: DownsampleMode,
+    #[serde(default, skip_serializing_if = "is_default_upsample")]
+    pub upsample_mode: UpsampleMode,
 }
+
+fn is_default_downsample(m: &DownsampleMode) -> bool { *m == DownsampleMode::Repeat }
+fn is_default_upsample(m: &UpsampleMode) -> bool { *m == UpsampleMode::Mean }
 
 impl ModuleParams {
     pub fn params_f64(&self) -> HashMap<String, f64> {
