@@ -1,9 +1,12 @@
-use std::collections::HashMap;
 use crate::config::{DownsampleMode, UpsampleMode};
 use crate::error::{BmiError, BmiResult};
+use std::collections::HashMap;
 
 fn err(msg: String) -> BmiError {
-    BmiError::FunctionFailed { model: "resample".into(), func: msg }
+    BmiError::FunctionFailed {
+        model: "resample".into(),
+        func: msg,
+    }
 }
 
 /// Resample a single value from a source time series to a destination time.
@@ -31,8 +34,13 @@ pub fn resample_value(
     if (ratio - 1.0).abs() < 1e-9 {
         // Same timestep: direct index
         let idx = (dest_time / source_dt).round() as usize;
-        return source_values.get(idx).copied()
-            .ok_or_else(|| err(format!("index {} out of bounds (len {})", idx, source_values.len())));
+        return source_values.get(idx).copied().ok_or_else(|| {
+            err(format!(
+                "index {} out of bounds (len {})",
+                idx,
+                source_values.len()
+            ))
+        });
     }
 
     if ratio > 1.0 {
@@ -133,8 +141,15 @@ mod tests {
         let source = vec![1.0, 2.0, 3.0, 4.0];
         let dt = 3600.0;
         for i in 0..4 {
-            let val = resample_value(&source, dt, i as f64 * dt, dt,
-                DownsampleMode::Repeat, UpsampleMode::Mean).unwrap();
+            let val = resample_value(
+                &source,
+                dt,
+                i as f64 * dt,
+                dt,
+                DownsampleMode::Repeat,
+                UpsampleMode::Mean,
+            )
+            .unwrap();
             assert!((val - source[i]).abs() < 1e-12);
         }
     }
@@ -148,13 +163,27 @@ mod tests {
 
         // At dest_time=0, 900, 1800, 2700 → all map to source[0]=10
         for t in [0.0, 900.0, 1800.0, 2700.0] {
-            let val = resample_value(&source, source_dt, t, dest_dt,
-                DownsampleMode::Repeat, UpsampleMode::Mean).unwrap();
+            let val = resample_value(
+                &source,
+                source_dt,
+                t,
+                dest_dt,
+                DownsampleMode::Repeat,
+                UpsampleMode::Mean,
+            )
+            .unwrap();
             assert!((val - 10.0).abs() < 1e-12, "at t={}, got {}", t, val);
         }
         // At dest_time=3600 → source[1]=20
-        let val = resample_value(&source, source_dt, 3600.0, dest_dt,
-            DownsampleMode::Repeat, UpsampleMode::Mean).unwrap();
+        let val = resample_value(
+            &source,
+            source_dt,
+            3600.0,
+            dest_dt,
+            DownsampleMode::Repeat,
+            UpsampleMode::Mean,
+        )
+        .unwrap();
         assert!((val - 20.0).abs() < 1e-12);
     }
 
@@ -166,23 +195,51 @@ mod tests {
         let dest_dt = 900.0;
 
         // At t=0 → 10.0
-        let val = resample_value(&source, source_dt, 0.0, dest_dt,
-            DownsampleMode::Interpolate, UpsampleMode::Mean).unwrap();
+        let val = resample_value(
+            &source,
+            source_dt,
+            0.0,
+            dest_dt,
+            DownsampleMode::Interpolate,
+            UpsampleMode::Mean,
+        )
+        .unwrap();
         assert!((val - 10.0).abs() < 1e-12);
 
         // At t=1800 (half between source[0] and source[1]) → 15.0
-        let val = resample_value(&source, source_dt, 1800.0, dest_dt,
-            DownsampleMode::Interpolate, UpsampleMode::Mean).unwrap();
+        let val = resample_value(
+            &source,
+            source_dt,
+            1800.0,
+            dest_dt,
+            DownsampleMode::Interpolate,
+            UpsampleMode::Mean,
+        )
+        .unwrap();
         assert!((val - 15.0).abs() < 1e-12);
 
         // At t=900 (quarter) → 12.5
-        let val = resample_value(&source, source_dt, 900.0, dest_dt,
-            DownsampleMode::Interpolate, UpsampleMode::Mean).unwrap();
+        let val = resample_value(
+            &source,
+            source_dt,
+            900.0,
+            dest_dt,
+            DownsampleMode::Interpolate,
+            UpsampleMode::Mean,
+        )
+        .unwrap();
         assert!((val - 12.5).abs() < 1e-12);
 
         // At t=3600 → 20.0
-        let val = resample_value(&source, source_dt, 3600.0, dest_dt,
-            DownsampleMode::Interpolate, UpsampleMode::Mean).unwrap();
+        let val = resample_value(
+            &source,
+            source_dt,
+            3600.0,
+            dest_dt,
+            DownsampleMode::Interpolate,
+            UpsampleMode::Mean,
+        )
+        .unwrap();
         assert!((val - 20.0).abs() < 1e-12);
     }
 
@@ -194,13 +251,27 @@ mod tests {
         let dest_dt = 3600.0;
 
         // At t=0, window [0, 3600) → indices 0..4 → [1,2,3,4] → mean=2.5
-        let val = resample_value(&source, source_dt, 0.0, dest_dt,
-            DownsampleMode::Repeat, UpsampleMode::Mean).unwrap();
+        let val = resample_value(
+            &source,
+            source_dt,
+            0.0,
+            dest_dt,
+            DownsampleMode::Repeat,
+            UpsampleMode::Mean,
+        )
+        .unwrap();
         assert!((val - 2.5).abs() < 1e-12);
 
         // At t=3600, window [3600, 7200) → indices 4..8 → [5,6,7,8] → mean=6.5
-        let val = resample_value(&source, source_dt, 3600.0, dest_dt,
-            DownsampleMode::Repeat, UpsampleMode::Mean).unwrap();
+        let val = resample_value(
+            &source,
+            source_dt,
+            3600.0,
+            dest_dt,
+            DownsampleMode::Repeat,
+            UpsampleMode::Mean,
+        )
+        .unwrap();
         assert!((val - 6.5).abs() < 1e-12);
     }
 
@@ -211,21 +282,49 @@ mod tests {
         let dest_dt = 3600.0;
 
         // Window [0, 3600) → [3, 1, 4, 1]
-        let val = resample_value(&source, source_dt, 0.0, dest_dt,
-            DownsampleMode::Repeat, UpsampleMode::Min).unwrap();
+        let val = resample_value(
+            &source,
+            source_dt,
+            0.0,
+            dest_dt,
+            DownsampleMode::Repeat,
+            UpsampleMode::Min,
+        )
+        .unwrap();
         assert!((val - 1.0).abs() < 1e-12);
 
-        let val = resample_value(&source, source_dt, 0.0, dest_dt,
-            DownsampleMode::Repeat, UpsampleMode::Max).unwrap();
+        let val = resample_value(
+            &source,
+            source_dt,
+            0.0,
+            dest_dt,
+            DownsampleMode::Repeat,
+            UpsampleMode::Max,
+        )
+        .unwrap();
         assert!((val - 4.0).abs() < 1e-12);
 
         // Window [3600, 7200) → [5, 9, 2, 6]
-        let val = resample_value(&source, source_dt, 3600.0, dest_dt,
-            DownsampleMode::Repeat, UpsampleMode::Min).unwrap();
+        let val = resample_value(
+            &source,
+            source_dt,
+            3600.0,
+            dest_dt,
+            DownsampleMode::Repeat,
+            UpsampleMode::Min,
+        )
+        .unwrap();
         assert!((val - 2.0).abs() < 1e-12);
 
-        let val = resample_value(&source, source_dt, 3600.0, dest_dt,
-            DownsampleMode::Repeat, UpsampleMode::Max).unwrap();
+        let val = resample_value(
+            &source,
+            source_dt,
+            3600.0,
+            dest_dt,
+            DownsampleMode::Repeat,
+            UpsampleMode::Max,
+        )
+        .unwrap();
         assert!((val - 9.0).abs() < 1e-12);
     }
 
@@ -235,8 +334,15 @@ mod tests {
         let source_dt = 900.0;
         let dest_dt = 3600.0;
 
-        let val = resample_value(&source, source_dt, 0.0, dest_dt,
-            DownsampleMode::Repeat, UpsampleMode::Mode).unwrap();
+        let val = resample_value(
+            &source,
+            source_dt,
+            0.0,
+            dest_dt,
+            DownsampleMode::Repeat,
+            UpsampleMode::Mode,
+        )
+        .unwrap();
         assert!((val - 2.0).abs() < 1e-12);
     }
 
@@ -247,13 +353,27 @@ mod tests {
         let dest_dt = 900.0;
 
         // At the very last source time, should return last value
-        let val = resample_value(&source, source_dt, 3600.0, dest_dt,
-            DownsampleMode::Interpolate, UpsampleMode::Mean).unwrap();
+        let val = resample_value(
+            &source,
+            source_dt,
+            3600.0,
+            dest_dt,
+            DownsampleMode::Interpolate,
+            UpsampleMode::Mean,
+        )
+        .unwrap();
         assert!((val - 20.0).abs() < 1e-12);
 
         // Past the last source, should clamp to last
-        let val = resample_value(&source, source_dt, 5400.0, dest_dt,
-            DownsampleMode::Interpolate, UpsampleMode::Mean).unwrap();
+        let val = resample_value(
+            &source,
+            source_dt,
+            5400.0,
+            dest_dt,
+            DownsampleMode::Interpolate,
+            UpsampleMode::Mean,
+        )
+        .unwrap();
         assert!((val - 20.0).abs() < 1e-12);
     }
 
@@ -266,8 +386,15 @@ mod tests {
         let dest_dt = 3600.0;
 
         // Window [0, 3600) → indices 0..ceil(3600/420)=9 → [0..8]
-        let val = resample_value(&source, source_dt, 0.0, dest_dt,
-            DownsampleMode::Repeat, UpsampleMode::Mean).unwrap();
+        let val = resample_value(
+            &source,
+            source_dt,
+            0.0,
+            dest_dt,
+            DownsampleMode::Repeat,
+            UpsampleMode::Mean,
+        )
+        .unwrap();
         // indices 0..9 → values 0,1,2,3,4,5,6,7,8 → mean = 4.0
         assert!((val - 4.0).abs() < 1e-12, "got {}", val);
     }

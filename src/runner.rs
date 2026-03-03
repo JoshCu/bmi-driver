@@ -1,17 +1,19 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::adapters::{BmiC, BmiSloth};
 #[cfg(feature = "fortran")]
 use crate::adapters::BmiFortran;
 #[cfg(feature = "python")]
 use crate::adapters::BmiPython;
-use crate::config::{parse_datetime, BmiAdapterType, DownsampleMode, ModuleConfig, RealizationConfig, UpsampleMode};
+use crate::adapters::{BmiC, BmiSloth};
+use crate::aliases;
+use crate::config::{
+    parse_datetime, BmiAdapterType, DownsampleMode, ModuleConfig, RealizationConfig, UpsampleMode,
+};
 use crate::error::{BmiError, BmiResult};
 use crate::forcings::{Forcings, NetCdfForcings};
-use crate::traits::{Bmi, BmiExt};
-use crate::aliases;
 use crate::resample;
+use crate::traits::{Bmi, BmiExt};
 use crate::units::UnitConversion;
 
 #[derive(Debug, Clone)]
@@ -107,14 +109,25 @@ impl ModelRunner {
         self.total_steps = ((end - start) / self.config.time.output_interval) as usize;
 
         // Register forcing variables with their timestep info
-        let forcing_dt = self.forcings.time_step().unwrap_or(self.config.time.output_interval as f64);
-        let forcing_steps = if forcing_dt > 0.0 { (span / forcing_dt) as usize } else { self.total_steps };
-        let forcing_ts = TimestepInfo { dt_seconds: forcing_dt, num_steps: forcing_steps };
+        let forcing_dt = self
+            .forcings
+            .time_step()
+            .unwrap_or(self.config.time.output_interval as f64);
+        let forcing_steps = if forcing_dt > 0.0 {
+            (span / forcing_dt) as usize
+        } else {
+            self.total_steps
+        };
+        let forcing_ts = TimestepInfo {
+            dt_seconds: forcing_dt,
+            num_steps: forcing_steps,
+        };
 
         self.vars.clear();
         self.source_timesteps.clear();
         for name in self.forcings.var_names()? {
-            self.source_timesteps.insert(name.clone(), forcing_ts.clone());
+            self.source_timesteps
+                .insert(name.clone(), forcing_ts.clone());
             self.vars.insert(name, VarSource::Forcing);
         }
 
@@ -250,7 +263,11 @@ impl ModelRunner {
             (Ok(dt), Ok(units)) => {
                 let factor = crate::traits::parse_time_units(&units);
                 let dt_sec = dt * factor;
-                if dt_sec > 0.0 { dt_sec } else { self.config.time.output_interval as f64 }
+                if dt_sec > 0.0 {
+                    dt_sec
+                } else {
+                    self.config.time.output_interval as f64
+                }
             }
             _ => {
                 if !self.suppress_warnings {
@@ -263,10 +280,14 @@ impl ModelRunner {
             }
         };
         let model_steps = (self.simulation_span_seconds / model_dt_seconds) as usize;
-        let timestep_info = TimestepInfo { dt_seconds: model_dt_seconds, num_steps: model_steps };
+        let timestep_info = TimestepInfo {
+            dt_seconds: model_dt_seconds,
+            num_steps: model_steps,
+        };
 
         for output in model.get_output_var_names()? {
-            self.source_timesteps.insert(output.clone(), timestep_info.clone());
+            self.source_timesteps
+                .insert(output.clone(), timestep_info.clone());
             self.vars.insert(output.clone(), VarSource::Model(idx));
         }
 
@@ -353,8 +374,12 @@ impl ModelRunner {
             for step in 0..output_steps + 1 {
                 let t = step as f64 * output_dt;
                 let v = resample::resample_value(
-                    vals, source_ts.dt_seconds, t, output_dt,
-                    DownsampleMode::default(), UpsampleMode::default(),
+                    vals,
+                    source_ts.dt_seconds,
+                    t,
+                    output_dt,
+                    DownsampleMode::default(),
+                    UpsampleMode::default(),
                 )?;
                 out.push(v);
             }
@@ -385,8 +410,11 @@ impl ModelRunner {
 
             for (model_input, source) in &input_map {
                 let val = self.get_var_resampled(
-                    source, dest_time, model_ts.dt_seconds,
-                    downsample_mode, upsample_mode,
+                    source,
+                    dest_time,
+                    model_ts.dt_seconds,
+                    downsample_mode,
+                    upsample_mode,
                 )?;
                 let val = if let Some(conv) = conversions.get(model_input) {
                     conv.convert(val)
@@ -419,11 +447,13 @@ impl ModelRunner {
         downsample_mode: DownsampleMode,
         upsample_mode: UpsampleMode,
     ) -> BmiResult<f64> {
-        let source_ts = self.source_timesteps.get(name)
-            .ok_or_else(|| BmiError::FunctionFailed {
-                model: "runner".into(),
-                func: format!("No timestep info for variable: {}", name),
-            })?;
+        let source_ts =
+            self.source_timesteps
+                .get(name)
+                .ok_or_else(|| BmiError::FunctionFailed {
+                    model: "runner".into(),
+                    func: format!("No timestep info for variable: {}", name),
+                })?;
         let source_dt = source_ts.dt_seconds;
 
         match self.vars.get(name) {
@@ -433,27 +463,40 @@ impl ModelRunner {
                     let step = (dest_time / source_dt).round() as usize;
                     return self.forcings.get_f64(name, &self.location_id, step);
                 }
-                self.resample_forcing(name, source_dt, dest_time, dest_dt,
-                    downsample_mode, upsample_mode)
+                self.resample_forcing(
+                    name,
+                    source_dt,
+                    dest_time,
+                    dest_dt,
+                    downsample_mode,
+                    upsample_mode,
+                )
             }
             Some(VarSource::Model(_)) => {
-                let source_data = self.outputs.get(name)
-                    .ok_or_else(|| BmiError::FunctionFailed {
-                        model: "runner".into(),
-                        func: format!("'{}' not yet computed", name),
-                    })?;
+                let source_data =
+                    self.outputs
+                        .get(name)
+                        .ok_or_else(|| BmiError::FunctionFailed {
+                            model: "runner".into(),
+                            func: format!("'{}' not yet computed", name),
+                        })?;
                 // Fast path: same timestep
                 if (source_dt - dest_dt).abs() < 1e-9 {
                     let step = (dest_time / source_dt).round() as usize;
-                    return source_data.get(step).copied()
-                        .ok_or_else(|| BmiError::FunctionFailed {
+                    return source_data.get(step).copied().ok_or_else(|| {
+                        BmiError::FunctionFailed {
                             model: "runner".into(),
                             func: format!("'{}' not available at step {}", name, step),
-                        });
+                        }
+                    });
                 }
                 resample::resample_value(
-                    source_data, source_dt, dest_time, dest_dt,
-                    downsample_mode, upsample_mode,
+                    source_data,
+                    source_dt,
+                    dest_time,
+                    dest_dt,
+                    downsample_mode,
+                    upsample_mode,
                 )
             }
             None => Err(BmiError::FunctionFailed {
@@ -479,16 +522,17 @@ impl ModelRunner {
             let fractional_idx = dest_time / source_dt;
             let lower_idx = fractional_idx.floor() as usize;
             match downsample_mode {
-                DownsampleMode::Repeat => {
-                    self.forcings.get_f64(name, &self.location_id, lower_idx)
-                }
+                DownsampleMode::Repeat => self.forcings.get_f64(name, &self.location_id, lower_idx),
                 DownsampleMode::Interpolate => {
                     let lower_val = self.forcings.get_f64(name, &self.location_id, lower_idx)?;
                     let frac = fractional_idx - lower_idx as f64;
                     if frac.abs() < 1e-12 {
                         return Ok(lower_val);
                     }
-                    match self.forcings.get_f64(name, &self.location_id, lower_idx + 1) {
+                    match self
+                        .forcings
+                        .get_f64(name, &self.location_id, lower_idx + 1)
+                    {
                         Ok(upper_val) => Ok(lower_val + frac * (upper_val - lower_val)),
                         Err(_) => Ok(lower_val), // boundary: use last value
                     }
@@ -518,9 +562,7 @@ impl ModelRunner {
     /// Get the units for a source variable (from forcings or a previous model's output).
     fn get_source_units(&self, name: &str) -> String {
         match self.vars.get(name) {
-            Some(VarSource::Forcing) => {
-                self.forcings.var_units(name).unwrap_or_default()
-            }
+            Some(VarSource::Forcing) => self.forcings.var_units(name).unwrap_or_default(),
             Some(VarSource::Model(idx)) => {
                 if let Some(m) = self.models.get(*idx) {
                     m.model.get_var_units(name).unwrap_or_default()
@@ -585,11 +627,11 @@ impl ModelRunner {
     fn source_label(&self, source_var: &str) -> String {
         match self.vars.get(source_var) {
             Some(VarSource::Forcing) => "forcing".to_string(),
-            Some(VarSource::Model(idx)) => {
-                self.models.get(*idx)
-                    .map(|src| src.name.clone())
-                    .unwrap_or_else(|| format!("model[{}]", idx))
-            }
+            Some(VarSource::Model(idx)) => self
+                .models
+                .get(*idx)
+                .map(|src| src.name.clone())
+                .unwrap_or_else(|| format!("model[{}]", idx)),
             None => "unknown".to_string(),
         }
     }

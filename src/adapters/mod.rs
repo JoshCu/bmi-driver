@@ -2,8 +2,10 @@
 //! BMI functions each adapter calls.
 
 mod c;
+pub mod ffi;
 #[cfg(feature = "fortran")]
 mod fortran;
+pub mod library;
 #[cfg(feature = "python")]
 mod python;
 mod sloth;
@@ -27,5 +29,11 @@ pub fn cstr_to_string(buffer: &[u8]) -> BmiResult<String> {
 }
 
 pub fn check_initialized(initialized: bool, model: &str) -> BmiResult<()> {
-    if initialized { Ok(()) } else { Err(BmiError::NotInitialized { model: model.into() }) }
+    if initialized {
+        Ok(())
+    } else {
+        Err(BmiError::NotInitialized {
+            model: model.into(),
+        })
+    }
 }

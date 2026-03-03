@@ -412,7 +412,10 @@ fn apply_suggestions(
 
                 if let Some(params) = params {
                     // Create variables_names_map if it doesn't exist
-                    if !params.get("variables_names_map").is_some_and(|v| v.is_object()) {
+                    if !params
+                        .get("variables_names_map")
+                        .is_some_and(|v| v.is_object())
+                    {
                         params.as_object_mut().unwrap().insert(
                             "variables_names_map".to_string(),
                             serde_json::Value::Object(serde_json::Map::new()),
@@ -432,11 +435,10 @@ fn apply_suggestions(
         }
     }
 
-    let updated =
-        serde_json::to_string_pretty(&root).map_err(|e| BmiError::FunctionFailed {
-            model: "config".into(),
-            func: format!("Failed to serialize: {}", e),
-        })?;
+    let updated = serde_json::to_string_pretty(&root).map_err(|e| BmiError::FunctionFailed {
+        model: "config".into(),
+        func: format!("Failed to serialize: {}", e),
+    })?;
     fs::write(realization, updated).map_err(|e| BmiError::FunctionFailed {
         model: "config".into(),
         func: format!("Failed to write {}: {}", realization.display(), e),
@@ -466,12 +468,22 @@ fn run_worker(
     let report_interval = ((locations.len() as f64) * 0.01).ceil().max(1.0) as usize;
 
     match output_format {
-        OutputFormat::Csv => {
-            run_worker_csv(&mut runner, locations, output_path, &output_vars, start_epoch, interval, report_interval)
-        }
-        OutputFormat::Netcdf => {
-            run_worker_netcdf(&mut runner, locations, output_path, &output_vars, report_interval)
-        }
+        OutputFormat::Csv => run_worker_csv(
+            &mut runner,
+            locations,
+            output_path,
+            &output_vars,
+            start_epoch,
+            interval,
+            report_interval,
+        ),
+        OutputFormat::Netcdf => run_worker_netcdf(
+            &mut runner,
+            locations,
+            output_path,
+            &output_vars,
+            report_interval,
+        ),
     }
 }
 
@@ -561,11 +573,21 @@ fn run_worker_netcdf(
         runner.run()?;
 
         let columns: Vec<(String, Vec<f64>)> = if output_vars.is_empty() {
-            runner.outputs.iter().map(|(name, vals)| (name.clone(), vals.clone())).collect()
+            runner
+                .outputs
+                .iter()
+                .map(|(name, vals)| (name.clone(), vals.clone()))
+                .collect()
         } else {
-            output_vars.iter().filter_map(|name| {
-                runner.outputs(name).ok().map(|vals| (name.clone(), vals.clone()))
-            }).collect()
+            output_vars
+                .iter()
+                .filter_map(|name| {
+                    runner
+                        .outputs(name)
+                        .ok()
+                        .map(|vals| (name.clone(), vals.clone()))
+                })
+                .collect()
         };
 
         writer.write(LocationResult {

@@ -4,10 +4,18 @@ use thiserror::Error;
 #[derive(Error, Debug)]
 pub enum BmiError {
     #[error("Failed to load library '{path}': {source}")]
-    LibraryLoad { path: String, #[source] source: DlError },
+    LibraryLoad {
+        path: String,
+        #[source]
+        source: DlError,
+    },
 
     #[error("Function '{func}' not found: {source}")]
-    SymbolNotFound { func: String, #[source] source: DlError },
+    SymbolNotFound {
+        func: String,
+        #[source]
+        source: DlError,
+    },
 
     #[error("BMI function '{func}' failed for model '{model}'")]
     FunctionFailed { model: String, func: String },

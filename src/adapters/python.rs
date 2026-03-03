@@ -3,9 +3,9 @@ use std::path::Path;
 
 use pyo3::prelude::*;
 
+use super::check_initialized;
 use crate::error::{BmiError, BmiResult};
 use crate::traits::{parse_time_units, Bmi, VarType};
-use super::check_initialized;
 
 /// BMI adapter for Python classes implementing the BMI interface.
 ///
@@ -71,19 +71,18 @@ impl BmiPython {
     /// `python_type` should be a dotted string like `"lstm.bmi_lstm.bmi_LSTM"` where the
     /// last component is the class name and the preceding components form the module path.
     /// The package must already be importable (installed or on `PYTHONPATH`).
-    pub fn load_from_type(
-        name: impl Into<String>,
-        python_type: &str,
-    ) -> BmiResult<Self> {
+    pub fn load_from_type(name: impl Into<String>, python_type: &str) -> BmiResult<Self> {
         let name = name.into();
 
-        let dot_pos = python_type.rfind('.').ok_or_else(|| BmiError::FunctionFailed {
-            model: name.clone(),
-            func: format!(
-                "python_type '{}' must be a dotted path like 'package.module.ClassName'",
-                python_type
-            ),
-        })?;
+        let dot_pos = python_type
+            .rfind('.')
+            .ok_or_else(|| BmiError::FunctionFailed {
+                model: name.clone(),
+                func: format!(
+                    "python_type '{}' must be a dotted path like 'package.module.ClassName'",
+                    python_type
+                ),
+            })?;
         let module_path = &python_type[..dot_pos];
         let class_name = &python_type[dot_pos + 1..];
 
@@ -96,7 +95,13 @@ impl BmiPython {
             func: format!("load_from_type: {e}"),
         })?;
 
-        Ok(Self { model_name: name, obj, initialized: false, time_factor: 1.0, type_cache: None })
+        Ok(Self {
+            model_name: name,
+            obj,
+            initialized: false,
+            time_factor: 1.0,
+            type_cache: None,
+        })
     }
 
     /// Import a `.py` file as a Python module and instantiate `class_name`.
@@ -127,51 +132,67 @@ impl BmiPython {
             func: format!("load: {e}"),
         })?;
 
-        Ok(Self { model_name: name, obj, initialized: false, time_factor: 1.0, type_cache: None })
+        Ok(Self {
+            model_name: name,
+            obj,
+            initialized: false,
+            time_factor: 1.0,
+            type_cache: None,
+        })
     }
 
     fn py_err(&self, func: &str, e: PyErr) -> BmiError {
-        BmiError::FunctionFailed { model: self.model_name.clone(), func: format!("{func}: {e}") }
+        BmiError::FunctionFailed {
+            model: self.model_name.clone(),
+            func: format!("{func}: {e}"),
+        }
     }
 
     fn call0_str(&self, py: Python<'_>, method: &str) -> BmiResult<String> {
-        self.obj.call_method0(py, method)
+        self.obj
+            .call_method0(py, method)
             .and_then(|r| r.extract::<String>(py))
             .map_err(|e| self.py_err(method, e))
     }
 
     fn call0_i32(&self, py: Python<'_>, method: &str) -> BmiResult<i32> {
-        self.obj.call_method0(py, method)
+        self.obj
+            .call_method0(py, method)
             .and_then(|r| r.extract::<i32>(py))
             .map_err(|e| self.py_err(method, e))
     }
 
     fn call0_f64(&self, py: Python<'_>, method: &str) -> BmiResult<f64> {
-        self.obj.call_method0(py, method)
+        self.obj
+            .call_method0(py, method)
             .and_then(|r| r.extract::<f64>(py))
             .map_err(|e| self.py_err(method, e))
     }
 
     fn call1_str(&self, py: Python<'_>, method: &str, arg: &str) -> BmiResult<String> {
-        self.obj.call_method1(py, method, (arg,))
+        self.obj
+            .call_method1(py, method, (arg,))
             .and_then(|r| r.extract::<String>(py))
             .map_err(|e| self.py_err(method, e))
     }
 
     fn call1_i32_str(&self, py: Python<'_>, method: &str, arg: &str) -> BmiResult<i32> {
-        self.obj.call_method1(py, method, (arg,))
+        self.obj
+            .call_method1(py, method, (arg,))
             .and_then(|r| r.extract::<i32>(py))
             .map_err(|e| self.py_err(method, e))
     }
 
     fn call1_i32_grid(&self, py: Python<'_>, method: &str, grid: i32) -> BmiResult<i32> {
-        self.obj.call_method1(py, method, (grid,))
+        self.obj
+            .call_method1(py, method, (grid,))
             .and_then(|r| r.extract::<i32>(py))
             .map_err(|e| self.py_err(method, e))
     }
 
     fn call1_str_grid(&self, py: Python<'_>, method: &str, grid: i32) -> BmiResult<String> {
-        self.obj.call_method1(py, method, (grid,))
+        self.obj
+            .call_method1(py, method, (grid,))
             .and_then(|r| r.extract::<String>(py))
             .map_err(|e| self.py_err(method, e))
     }
@@ -198,25 +219,43 @@ impl BmiPython {
 }
 
 impl Bmi for BmiPython {
-    fn name(&self) -> &str { &self.model_name }
-    fn is_initialized(&self) -> bool { self.initialized }
-    fn var_type_cache(&self) -> Option<&HashMap<String, VarType>> { self.type_cache.as_ref() }
-    fn var_type_cache_mut(&mut self) -> &mut Option<HashMap<String, VarType>> { &mut self.type_cache }
-    fn time_factor(&self) -> f64 { self.time_factor }
+    fn name(&self) -> &str {
+        &self.model_name
+    }
+    fn is_initialized(&self) -> bool {
+        self.initialized
+    }
+    fn var_type_cache(&self) -> Option<&HashMap<String, VarType>> {
+        self.type_cache.as_ref()
+    }
+    fn var_type_cache_mut(&mut self) -> &mut Option<HashMap<String, VarType>> {
+        &mut self.type_cache
+    }
+    fn time_factor(&self) -> f64 {
+        self.time_factor
+    }
 
     fn initialize(&mut self, config: &str) -> BmiResult<()> {
         if self.initialized {
-            return Err(BmiError::AlreadyInitialized { model: self.model_name.clone() });
+            return Err(BmiError::AlreadyInitialized {
+                model: self.model_name.clone(),
+            });
         }
         if !Path::new(config).exists() {
-            return Err(BmiError::ConfigNotFound { path: config.into() });
+            return Err(BmiError::ConfigNotFound {
+                path: config.into(),
+            });
         }
         Python::with_gil(|py| {
-            self.obj.call_method1(py, "initialize", (config,))
+            self.obj
+                .call_method1(py, "initialize", (config,))
                 .map_err(|e| self.py_err("initialize", e))
         })?;
         self.initialized = true;
-        self.time_factor = self.get_time_units().map(|u| parse_time_units(&u)).unwrap_or(1.0);
+        self.time_factor = self
+            .get_time_units()
+            .map(|u| parse_time_units(&u))
+            .unwrap_or(1.0);
         self.cache_types()?;
         Ok(())
     }
@@ -224,7 +263,9 @@ impl Bmi for BmiPython {
     fn update(&mut self) -> BmiResult<()> {
         check_initialized(self.initialized, &self.model_name)?;
         Python::with_gil(|py| {
-            self.obj.call_method0(py, "update").map_err(|e| self.py_err("update", e))
+            self.obj
+                .call_method0(py, "update")
+                .map_err(|e| self.py_err("update", e))
         })?;
         Ok(())
     }
@@ -232,16 +273,21 @@ impl Bmi for BmiPython {
     fn update_until(&mut self, time: f64) -> BmiResult<()> {
         check_initialized(self.initialized, &self.model_name)?;
         Python::with_gil(|py| {
-            self.obj.call_method1(py, "update_until", (time,))
+            self.obj
+                .call_method1(py, "update_until", (time,))
                 .map_err(|e| self.py_err("update_until", e))
         })?;
         Ok(())
     }
 
     fn finalize(&mut self) -> BmiResult<()> {
-        if !self.initialized { return Ok(()); }
+        if !self.initialized {
+            return Ok(());
+        }
         Python::with_gil(|py| {
-            self.obj.call_method0(py, "finalize").map_err(|e| self.py_err("finalize", e))
+            self.obj
+                .call_method0(py, "finalize")
+                .map_err(|e| self.py_err("finalize", e))
         })?;
         self.initialized = false;
         Ok(())
@@ -264,7 +310,8 @@ impl Bmi for BmiPython {
     fn get_input_var_names(&self) -> BmiResult<Vec<String>> {
         check_initialized(self.initialized, &self.model_name)?;
         Python::with_gil(|py| {
-            self.obj.call_method0(py, "get_input_var_names")
+            self.obj
+                .call_method0(py, "get_input_var_names")
                 .and_then(|r| r.extract::<Vec<String>>(py))
                 .map_err(|e| self.py_err("get_input_var_names", e))
         })
@@ -273,7 +320,8 @@ impl Bmi for BmiPython {
     fn get_output_var_names(&self) -> BmiResult<Vec<String>> {
         check_initialized(self.initialized, &self.model_name)?;
         Python::with_gil(|py| {
-            self.obj.call_method0(py, "get_output_var_names")
+            self.obj
+                .call_method0(py, "get_output_var_names")
                 .and_then(|r| r.extract::<Vec<String>>(py))
                 .map_err(|e| self.py_err("get_output_var_names", e))
         })
@@ -397,6 +445,8 @@ impl Bmi for BmiPython {
 
 impl Drop for BmiPython {
     fn drop(&mut self) {
-        if self.initialized { let _ = self.finalize(); }
+        if self.initialized {
+            let _ = self.finalize();
+        }
     }
 }
