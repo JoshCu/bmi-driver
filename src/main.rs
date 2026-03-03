@@ -77,6 +77,10 @@ struct Args {
     /// Number of locations to process on this node (0 = all remaining, for SLURM/multi-node use)
     #[arg(long, default_value_t = 0)]
     node_count: usize,
+
+    /// Internal: output variable names for zarr workers (comma-separated)
+    #[arg(long, hide = true)]
+    output_vars: Option<String>,
 }
 
 fn main() -> Result<(), BmiError> {
@@ -135,7 +139,7 @@ fn main() -> Result<(), BmiError> {
 
     if let (Some(start), Some(end)) = (args.worker_start, args.worker_end) {
         let output_path = data_dir.join("outputs").join("bmi-driver");
-        run_worker(&realization, &locations[start..end], &output_path)
+        run_worker(&realization, &locations[start..end], &output_path, start, &args.output_vars)
     } else {
         run_parent(&data_dir, &realization, &locations, jobs, progress)
     }
@@ -162,11 +166,38 @@ fn run_parent(
 ) -> Result<(), BmiError> {
     // Check for missing mappings and print active unit conversions
     let output_format;
+    #[cfg(feature = "zarr")]
+    let mut discovered_vars: Vec<String> = Vec::new();
     {
         let mut runner = ModelRunner::from_config(realization)?;
         output_format = runner.config.output_format;
         if let Some(loc) = locations.first() {
             runner.initialize(loc)?;
+
+            // Discover output variable names for zarr (needs to create arrays upfront)
+            #[cfg(feature = "zarr")]
+            {
+                let config_output_vars: Vec<String> = runner
+                    .config
+                    .global
+                    .formulations
+                    .first()
+                    .map(|f| f.params.output_variables.clone())
+                    .unwrap_or_default();
+                if config_output_vars.is_empty() {
+                    for model in &runner.models {
+                        if let Ok(names) = model.model.get_output_var_names() {
+                            for name in names {
+                                if !discovered_vars.contains(&name) {
+                                    discovered_vars.push(name);
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    discovered_vars = config_output_vars;
+                }
+            }
 
             let suggestions = runner.find_missing_mappings();
             if !suggestions.is_empty() {
@@ -223,6 +254,30 @@ fn run_parent(
     let output_path = data_dir.join("outputs").join("bmi-driver");
     fs::create_dir_all(&output_path).unwrap();
 
+    // For zarr: create the store before spawning workers so they can write directly
+    #[cfg(feature = "zarr")]
+    let output_vars_csv: String = if output_format == OutputFormat::Zarr {
+        let runner_tmp = ModelRunner::from_config(realization)?;
+        let start_time = &runner_tmp.config.time.start_time;
+        let interval = runner_tmp.config.time.output_interval;
+        let start_epoch = bmi_driver::parse_datetime(start_time)?;
+        let end_epoch = bmi_driver::parse_datetime(&runner_tmp.config.time.end_time)?;
+        let total_steps = ((end_epoch - start_epoch) / interval) as usize;
+        let zarr_path = output_path.join("results.zarr");
+
+        bmi_driver::output::zarr::create_zarr_store(
+            &zarr_path,
+            start_time,
+            interval,
+            total_steps,
+            locations,
+            &discovered_vars,
+        )?;
+        discovered_vars.join(",")
+    } else {
+        String::new()
+    };
+
     let mp = MultiProgress::new();
 
     // Overall progress bar (shown for Full and Summary)
@@ -263,12 +318,19 @@ fn run_parent(
         let end = ((i + 1) * chunk_size).min(n_locations);
         let worker_count = (end - start) as u64;
 
-        let mut child = Command::new(&exe)
-            .arg(data_dir)
+        let mut cmd = Command::new(&exe);
+        cmd.arg(data_dir)
             .arg("--worker-start")
             .arg(start.to_string())
             .arg("--worker-end")
-            .arg(end.to_string())
+            .arg(end.to_string());
+
+        #[cfg(feature = "zarr")]
+        if output_format == OutputFormat::Zarr && !output_vars_csv.is_empty() {
+            cmd.arg("--output-vars").arg(&output_vars_csv);
+        }
+
+        let mut child = cmd
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
@@ -359,7 +421,7 @@ fn run_parent(
         }
         if !worker_files.is_empty() {
             let final_path = output_path.join("results.nc");
-            bmi_driver::output_netcdf::merge_netcdf_files(&worker_files, &final_path)?;
+            bmi_driver::output::netcdf::merge_netcdf_files(&worker_files, &final_path)?;
         }
     }
     Ok(())
@@ -451,6 +513,8 @@ fn run_worker(
     realization: &PathBuf,
     locations: &[String],
     output_path: &PathBuf,
+    #[cfg_attr(not(feature = "zarr"), allow(unused))] global_start: usize,
+    #[cfg_attr(not(feature = "zarr"), allow(unused))] cli_output_vars: &Option<String>,
 ) -> Result<(), BmiError> {
     let mut runner = ModelRunner::from_config(realization)?;
     runner.suppress_warnings = true;
@@ -484,6 +548,25 @@ fn run_worker(
             &output_vars,
             report_interval,
         ),
+        #[cfg(feature = "zarr")]
+        OutputFormat::Zarr => {
+            let zarr_vars: Vec<String> = cli_output_vars
+                .as_deref()
+                .unwrap_or("")
+                .split(',')
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .collect();
+            run_worker_zarr(
+                &mut runner,
+                locations,
+                output_path,
+                &output_vars,
+                &zarr_vars,
+                global_start,
+                report_interval,
+            )
+        }
     }
 }
 
@@ -552,7 +635,7 @@ fn run_worker_netcdf(
     output_vars: &[String],
     report_interval: usize,
 ) -> Result<(), BmiError> {
-    use bmi_driver::output_netcdf::{LocationResult, NetCdfWriter};
+    use bmi_driver::output::netcdf::{LocationResult, NetCdfWriter};
 
     // Determine the worker's tmp file name from the first location
     let tmp_name = if let Some(first) = locations.first() {
@@ -607,6 +690,58 @@ fn run_worker_netcdf(
     }
 
     writer.finish()?;
+    Ok(())
+}
+
+#[cfg(feature = "zarr")]
+fn run_worker_zarr(
+    runner: &mut ModelRunner,
+    locations: &[String],
+    output_path: &PathBuf,
+    output_vars: &[String],
+    zarr_vars: &[String],
+    global_start: usize,
+    report_interval: usize,
+) -> Result<(), BmiError> {
+    let zarr_path = output_path.join("results.zarr");
+
+    // Use zarr_vars (from parent's --output-vars) if output_vars (from config) is empty
+    let effective_vars = if output_vars.is_empty() {
+        zarr_vars
+    } else {
+        output_vars
+    };
+
+    for (i, location) in locations.iter().enumerate() {
+        runner.initialize(location)?;
+        runner.run()?;
+
+        let columns: Vec<(String, Vec<f64>)> = if effective_vars.is_empty() {
+            runner
+                .outputs
+                .iter()
+                .map(|(name, vals)| (name.clone(), vals.clone()))
+                .collect()
+        } else {
+            effective_vars
+                .iter()
+                .filter_map(|name| {
+                    runner
+                        .outputs(name)
+                        .ok()
+                        .map(|vals| (name.clone(), vals.clone()))
+                })
+                .collect()
+        };
+
+        bmi_driver::output::zarr::write_location(&zarr_path, global_start + i, &columns)?;
+
+        runner.finalize()?;
+
+        if (i + 1) % report_interval == 0 || i + 1 == locations.len() {
+            println!("{}", i + 1);
+        }
+    }
     Ok(())
 }
 

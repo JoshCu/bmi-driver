@@ -3,7 +3,7 @@ mod types;
 mod variables;
 
 pub mod config;
-pub mod output_netcdf;
+pub mod output;
 pub mod runner;
 
 // Re-export submodules at crate root so internal imports (e.g. crate::error) still resolve.

@@ -47,6 +47,8 @@ impl Default for UpsampleMode {
 pub enum OutputFormat {
     Csv,
     Netcdf,
+    #[cfg(feature = "zarr")]
+    Zarr,
 }
 
 impl Default for OutputFormat {
