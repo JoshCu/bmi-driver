@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -10,6 +11,22 @@ fn err(msg: String) -> BmiError {
     BmiError::FunctionFailed {
         model: "netcdf_writer".into(),
         func: msg,
+    }
+}
+
+/// Suppress HDF5's default error handler which prints verbose diagnostics
+/// to stderr (e.g. "No such file or directory" when checking if a file exists
+/// before creating it). These are not real errors — just internal HDF5 checks.
+fn suppress_hdf5_errors() {
+    extern "C" {
+        fn H5Eset_auto2(
+            estack_id: i64,
+            func: *const std::ffi::c_void,
+            client_data: *mut std::ffi::c_void,
+        ) -> i32;
+    }
+    unsafe {
+        H5Eset_auto2(0, std::ptr::null(), std::ptr::null_mut());
     }
 }
 
@@ -26,6 +43,9 @@ enum WriterMessage {
 pub struct NetCdfWriter {
     sender: Sender<WriterMessage>,
     handle: Option<JoinHandle<BmiResult<()>>>,
+    /// Shared error state: if the writer thread dies, the actual error is stored here
+    /// so write() can report it instead of just "sending on a closed channel".
+    thread_error: Arc<Mutex<Option<BmiError>>>,
 }
 
 impl NetCdfWriter {
@@ -37,20 +57,44 @@ impl NetCdfWriter {
     ) -> BmiResult<Self> {
         let (tx, rx) = mpsc::channel();
         let start_time = start_time.to_string();
+        let thread_error: Arc<Mutex<Option<BmiError>>> = Arc::new(Mutex::new(None));
+        let thread_error_clone = Arc::clone(&thread_error);
 
-        let handle =
-            thread::spawn(move || writer_thread(rx, path, &start_time, interval, total_steps));
+        let handle = thread::spawn(move || {
+            let result = writer_thread(rx, path, &start_time, interval, total_steps);
+            if let Err(ref e) = result {
+                if let Ok(mut guard) = thread_error_clone.lock() {
+                    *guard = Some(BmiError::FunctionFailed {
+                        model: "netcdf_writer".into(),
+                        func: format!("{}", e),
+                    });
+                }
+            }
+            result
+        });
 
         Ok(Self {
             sender: tx,
             handle: Some(handle),
+            thread_error,
         })
     }
 
     pub fn write(&self, result: LocationResult) -> BmiResult<()> {
         self.sender
             .send(WriterMessage::Write(result))
-            .map_err(|e| err(format!("Failed to send to writer thread: {}", e)))
+            .map_err(|_| {
+                // Channel closed — the writer thread died. Report the actual error.
+                if let Ok(guard) = self.thread_error.lock() {
+                    if let Some(ref e) = *guard {
+                        return BmiError::FunctionFailed {
+                            model: "netcdf_writer".into(),
+                            func: format!("Writer thread failed: {}", e),
+                        };
+                    }
+                }
+                err("Writer thread exited unexpectedly".into())
+            })
     }
 
     pub fn finish(mut self) -> BmiResult<()> {
@@ -72,6 +116,8 @@ fn writer_thread(
     interval: i64,
     total_steps: usize,
 ) -> BmiResult<()> {
+    suppress_hdf5_errors();
+
     let mut file: Option<netcdf::FileMut> = None;
     let mut var_names: Vec<String> = Vec::new();
     let mut location_count: usize = 0;
@@ -150,8 +196,8 @@ fn init_netcdf(
 
     file.add_dimension("time", n_times)
         .map_err(|e| err(format!("Failed to add time dimension: {}", e)))?;
-    file.add_unlimited_dimension("catchment_id")
-        .map_err(|e| err(format!("Failed to add catchment_id dimension: {}", e)))?;
+    file.add_unlimited_dimension("id")
+        .map_err(|e| err(format!("Failed to add id dimension: {}", e)))?;
 
     // Time variable
     let time_values: Vec<f64> = (0..n_times).map(|i| (i as f64) * interval as f64).collect();
@@ -168,9 +214,9 @@ fn init_netcdf(
         .put_values(&time_values, ..)
         .map_err(|e| err(format!("Failed to write time values: {}", e)))?;
 
-    // Location ID variable (store as string)
-    file.add_string_variable("ids", &["catchment_id"])
-        .map_err(|e| err(format!("Failed to add ids variable: {}", e)))?;
+    // Location ID coordinate variable (same name as dimension for xarray .sel() support)
+    file.add_string_variable("id", &["id"])
+        .map_err(|e| err(format!("Failed to add id variable: {}", e)))?;
 
     // Output variables — discover from first result
     let var_names: Vec<String> = first_result
@@ -180,7 +226,7 @@ fn init_netcdf(
         .collect();
     for name in &var_names {
         let mut var = file
-            .add_variable::<f32>(name, &["catchment_id", "time"])
+            .add_variable::<f32>(name, &["id", "time"])
             .map_err(|e| err(format!("Failed to add variable '{}': {}", name, e)))?;
         var.put_attribute("_FillValue", -9999.0f32)
             .map_err(|e| err(format!("Failed to set _FillValue on '{}': {}", name, e)))?;
@@ -208,8 +254,8 @@ fn write_batch(
 
     // Write location IDs
     let mut ids_var = file
-        .variable_mut("ids")
-        .ok_or_else(|| err("ids variable not found".into()))?;
+        .variable_mut("id")
+        .ok_or_else(|| err("id variable not found".into()))?;
     for (i, result) in batch.iter().enumerate() {
         ids_var
             .put_string(&result.location_id, start_idx + i)
@@ -245,6 +291,8 @@ fn write_batch(
 
 /// Merge multiple per-worker NetCDF files into a single output file.
 pub fn merge_netcdf_files(worker_files: &[PathBuf], output_path: &Path) -> BmiResult<()> {
+    suppress_hdf5_errors();
+
     if worker_files.is_empty() {
         return Ok(());
     }
@@ -292,12 +340,12 @@ pub fn merge_netcdf_files(worker_files: &[PathBuf], output_path: &Path) -> BmiRe
         })
         .unwrap_or_default();
 
-    // Discover output variable names (everything except time and ids)
+    // Discover output variable names (everything except time and id)
     let var_names: Vec<String> = first
         .variables()
         .filter(|v| {
             let name = v.name();
-            name != "time" && name != "ids"
+            name != "time" && name != "id"
         })
         .map(|v| v.name())
         .collect();
@@ -312,8 +360,8 @@ pub fn merge_netcdf_files(worker_files: &[PathBuf], output_path: &Path) -> BmiRe
         .add_dimension("time", n_times)
         .map_err(|e| err(format!("Failed to add time dim: {}", e)))?;
     merged
-        .add_unlimited_dimension("catchment_id")
-        .map_err(|e| err(format!("Failed to add catchment_id dim: {}", e)))?;
+        .add_unlimited_dimension("id")
+        .map_err(|e| err(format!("Failed to add id dim: {}", e)))?;
 
     let mut time_out = merged
         .add_variable::<f64>("time", &["time"])
@@ -331,12 +379,12 @@ pub fn merge_netcdf_files(worker_files: &[PathBuf], output_path: &Path) -> BmiRe
         .map_err(|e| err(format!("Failed to write time: {}", e)))?;
 
     merged
-        .add_string_variable("ids", &["catchment_id"])
-        .map_err(|e| err(format!("Failed to add ids var: {}", e)))?;
+        .add_string_variable("id", &["id"])
+        .map_err(|e| err(format!("Failed to add id var: {}", e)))?;
 
     for name in &var_names {
         let mut var = merged
-            .add_variable::<f32>(name, &["catchment_id", "time"])
+            .add_variable::<f32>(name, &["id", "time"])
             .map_err(|e| err(format!("Failed to add var '{}': {}", name, e)))?;
         var.put_attribute("_FillValue", -9999.0f32)
             .map_err(|e| err(format!("Failed to set _FillValue: {}", e)))?;
@@ -348,18 +396,18 @@ pub fn merge_netcdf_files(worker_files: &[PathBuf], output_path: &Path) -> BmiRe
         let src = netcdf::open(worker_path)
             .map_err(|e| err(format!("Failed to open {}: {}", worker_path.display(), e)))?;
 
-        let n_locs = src.dimension("catchment_id").map(|d| d.len()).unwrap_or(0);
+        let n_locs = src.dimension("id").map(|d| d.len()).unwrap_or(0);
         if n_locs == 0 {
             continue;
         }
 
         // Copy location IDs
         let ids_src = src
-            .variable("ids")
-            .ok_or_else(|| err("ids variable not found in worker file".into()))?;
+            .variable("id")
+            .ok_or_else(|| err("id variable not found in worker file".into()))?;
         let mut ids_dst = merged
-            .variable_mut("ids")
-            .ok_or_else(|| err("ids variable not found in merged file".into()))?;
+            .variable_mut("id")
+            .ok_or_else(|| err("id variable not found in merged file".into()))?;
         for i in 0..n_locs {
             let id = ids_src
                 .get_string(i)

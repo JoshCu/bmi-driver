@@ -564,7 +564,11 @@ fn run_worker_netcdf(
 
     let start_time = runner.config.time.start_time.clone();
     let interval = runner.config.time.output_interval;
-    let total_steps = runner.total_steps;
+    // Calculate total_steps from config directly — runner.total_steps is 0
+    // until initialize() is called, but we need it before the first initialize().
+    let start_epoch = bmi_driver::parse_datetime(&start_time)?;
+    let end_epoch = bmi_driver::parse_datetime(&runner.config.time.end_time)?;
+    let total_steps = ((end_epoch - start_epoch) / interval) as usize;
 
     let writer = NetCdfWriter::new(nc_path, &start_time, interval, total_steps)?;
 
