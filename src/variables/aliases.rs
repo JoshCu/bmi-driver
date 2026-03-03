@@ -6,23 +6,67 @@
 
 /// Each entry is (short_name, csdms_standard_name, units).
 const WELL_KNOWN_FIELDS: &[(&str, &str, &str)] = &[
-    ("precip_rate", "atmosphere_water__liquid_equivalent_precipitation_rate", "mm s^-1"),
-    ("APCP_surface", "atmosphere_water__rainfall_volume_flux", "kg m^-2"),
-    ("DLWRF_surface", "land_surface_radiation~incoming~longwave__energy_flux", "W m-2"),
-    ("DSWRF_surface", "land_surface_radiation~incoming~shortwave__energy_flux", "W m-2"),
+    (
+        "precip_rate",
+        "atmosphere_water__liquid_equivalent_precipitation_rate",
+        "mm s^-1",
+    ),
+    (
+        "APCP_surface",
+        "atmosphere_water__rainfall_volume_flux",
+        "kg m^-2",
+    ),
+    (
+        "DLWRF_surface",
+        "land_surface_radiation~incoming~longwave__energy_flux",
+        "W m-2",
+    ),
+    (
+        "DSWRF_surface",
+        "land_surface_radiation~incoming~shortwave__energy_flux",
+        "W m-2",
+    ),
     ("PRES_surface", "land_surface_air__pressure", "Pa"),
-    ("SPFH_2maboveground", "atmosphere_air_water~vapor__relative_saturation", "kg kg-1"),
+    (
+        "SPFH_2maboveground",
+        "atmosphere_air_water~vapor__relative_saturation",
+        "kg kg-1",
+    ),
     ("TMP_2maboveground", "land_surface_air__temperature", "K"),
-    ("UGRD_10maboveground", "land_surface_wind__x_component_of_velocity", "m s-1"),
-    ("VGRD_10maboveground", "land_surface_wind__y_component_of_velocity", "m s-1"),
-    ("RAINRATE", "atmosphere_water__liquid_equivalent_precipitation_rate", "mm s^-1"),
+    (
+        "UGRD_10maboveground",
+        "land_surface_wind__x_component_of_velocity",
+        "m s-1",
+    ),
+    (
+        "VGRD_10maboveground",
+        "land_surface_wind__y_component_of_velocity",
+        "m s-1",
+    ),
+    (
+        "RAINRATE",
+        "atmosphere_water__liquid_equivalent_precipitation_rate",
+        "mm s^-1",
+    ),
     ("T2D", "land_surface_air__temperature", "K"),
-    ("Q2D", "atmosphere_air_water~vapor__relative_saturation", "kg kg-1"),
+    (
+        "Q2D",
+        "atmosphere_air_water~vapor__relative_saturation",
+        "kg kg-1",
+    ),
     ("U2D", "land_surface_wind__x_component_of_velocity", "m s-1"),
     ("V2D", "land_surface_wind__y_component_of_velocity", "m s-1"),
     ("PSFC", "land_surface_air__pressure", "Pa"),
-    ("SWDOWN", "land_surface_radiation~incoming~shortwave__energy_flux", "W m-2"),
-    ("LWDOWN", "land_surface_radiation~incoming~longwave__energy_flux", "W m-2"),
+    (
+        "SWDOWN",
+        "land_surface_radiation~incoming~shortwave__energy_flux",
+        "W m-2",
+    ),
+    (
+        "LWDOWN",
+        "land_surface_radiation~incoming~longwave__energy_flux",
+        "W m-2",
+    ),
 ];
 
 /// Given a variable name, find all known aliases (other names for the same quantity).

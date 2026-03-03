@@ -9,9 +9,10 @@ repository = "https://github.com/JoshCu/bmi-driver"
 readme = "README.md"
 
 [features]
-default = ["fortran", "python"]
+default = ["fortran", "python", "zarr"]
 fortran = []
 python = ["dep:pyo3"]
+zarr = ["dep:zarrs"]
 
 [dependencies]
 pyo3 = { version = "0.22", features = ["auto-initialize"], optional = true }
@@ -25,6 +26,7 @@ anyhow = "1.0.100"
 indicatif = "0.17"
 toml = "0.8"
 dirs = "5"
+zarrs = { version = "0.23", features = ["filesystem"], optional = true }
 
 [[bin]]
 name = "bmi-driver"

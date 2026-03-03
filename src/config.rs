@@ -1,8 +1,65 @@
+use crate::error::{BmiError, BmiResult};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use crate::error::{BmiError, BmiResult};
+
+/// How to resample when the source has a coarser timestep than the destination.
+/// Example: daily source feeding an hourly model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DownsampleMode {
+    /// Repeat the source value for all sub-steps (sample-and-hold)
+    Repeat,
+    /// Linearly interpolate between consecutive source values
+    Interpolate,
+}
+
+impl Default for DownsampleMode {
+    fn default() -> Self {
+        Self::Repeat
+    }
+}
+
+/// How to resample when the source has a finer timestep than the destination.
+/// Example: 5-minute source feeding an hourly model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpsampleMode {
+    /// Arithmetic mean of all source values in the window
+    Mean,
+    /// Most frequent value (for categorical/integer data)
+    Mode,
+    /// Minimum value in the window
+    Min,
+    /// Maximum value in the window
+    Max,
+}
+
+impl Default for UpsampleMode {
+    fn default() -> Self {
+        Self::Mean
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutputFormat {
+    Csv,
+    Netcdf,
+    #[cfg(feature = "zarr")]
+    Zarr,
+}
+
+impl Default for OutputFormat {
+    fn default() -> Self {
+        Self::Csv
+    }
+}
+
+fn is_default_output_format(f: &OutputFormat) -> bool {
+    *f == OutputFormat::Csv
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RealizationConfig {
@@ -10,6 +67,8 @@ pub struct RealizationConfig {
     pub time: TimeConfig,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub output_root: String,
+    #[serde(default, skip_serializing_if = "is_default_output_format")]
+    pub output_format: OutputFormat,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -26,7 +85,9 @@ pub struct TimeConfig {
     pub output_interval: i64,
 }
 
-fn default_interval() -> i64 { 3600 }
+fn default_interval() -> i64 {
+    3600
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ForcingConfig {
@@ -93,29 +154,46 @@ pub struct ModuleParams {
     pub fixed_time_step: bool,
     #[serde(default, skip_serializing)]
     pub uses_forcing_file: bool,
+    #[serde(default, skip_serializing_if = "is_default_downsample")]
+    pub downsample_mode: DownsampleMode,
+    #[serde(default, skip_serializing_if = "is_default_upsample")]
+    pub upsample_mode: UpsampleMode,
+}
+
+fn is_default_downsample(m: &DownsampleMode) -> bool {
+    *m == DownsampleMode::Repeat
+}
+fn is_default_upsample(m: &UpsampleMode) -> bool {
+    *m == UpsampleMode::Mean
 }
 
 impl ModuleParams {
     pub fn params_f64(&self) -> HashMap<String, f64> {
-        self.model_params.iter().filter_map(|(k, v)| {
-            let val = match v {
-                serde_json::Value::Number(n) => n.as_f64(),
-                serde_json::Value::String(s) => s.parse().ok(),
-                _ => None,
-            };
-            val.map(|f| (k.clone(), f))
-        }).collect()
+        self.model_params
+            .iter()
+            .filter_map(|(k, v)| {
+                let val = match v {
+                    serde_json::Value::Number(n) => n.as_f64(),
+                    serde_json::Value::String(s) => s.parse().ok(),
+                    _ => None,
+                };
+                val.map(|f| (k.clone(), f))
+            })
+            .collect()
     }
 
     pub fn params_string(&self) -> HashMap<String, String> {
-        self.model_params.iter().map(|(k, v)| {
-            let s = match v {
-                serde_json::Value::Number(n) => n.to_string(),
-                serde_json::Value::String(s) => s.clone(),
-                _ => v.to_string(),
-            };
-            (k.clone(), s)
-        }).collect()
+        self.model_params
+            .iter()
+            .map(|(k, v)| {
+                let s = match v {
+                    serde_json::Value::Number(n) => n.to_string(),
+                    serde_json::Value::String(s) => s.clone(),
+                    _ => v.to_string(),
+                };
+                (k.clone(), s)
+            })
+            .collect()
     }
 
     pub fn init_config(&self, loc_id: &str) -> String {
@@ -148,42 +226,58 @@ impl BmiAdapterType {
 impl RealizationConfig {
     pub fn from_file(path: impl AsRef<Path>) -> BmiResult<Self> {
         let path = path.as_ref();
-        let content = fs::read_to_string(path)
-            .map_err(|e| BmiError::ConfigNotFound { path: format!("{}: {}", path.display(), e) })?;
-        serde_json::from_str(&content)
-            .map_err(|e| BmiError::FunctionFailed { model: "config".into(), func: format!("parse: {}", e) })
+        let content = fs::read_to_string(path).map_err(|e| BmiError::ConfigNotFound {
+            path: format!("{}: {}", path.display(), e),
+        })?;
+        serde_json::from_str(&content).map_err(|e| BmiError::FunctionFailed {
+            model: "config".into(),
+            func: format!("parse: {}", e),
+        })
     }
 
     pub fn modules(&self) -> Vec<&ModuleConfig> {
-        self.global.formulations.iter()
+        self.global
+            .formulations
+            .iter()
             .filter(|f| f.name == "bmi_multi")
             .flat_map(|f| f.params.modules.iter())
             .collect()
     }
 
     pub fn main_output(&self) -> Option<&str> {
-        self.global.formulations.first().map(|f| f.params.main_output_variable.as_str())
+        self.global
+            .formulations
+            .first()
+            .map(|f| f.params.main_output_variable.as_str())
     }
 }
 
 pub fn minify_file(path: &Path) -> BmiResult<()> {
     let config = RealizationConfig::from_file(path)?;
-    let json = serde_json::to_string_pretty(&config)
-        .map_err(|e| BmiError::FunctionFailed { model: "config".into(), func: format!("serialize: {}", e) })?;
-    fs::write(path, json)
-        .map_err(|e| BmiError::FunctionFailed { model: "config".into(), func: format!("write {}: {}", path.display(), e) })?;
+    let json = serde_json::to_string_pretty(&config).map_err(|e| BmiError::FunctionFailed {
+        model: "config".into(),
+        func: format!("serialize: {}", e),
+    })?;
+    fs::write(path, json).map_err(|e| BmiError::FunctionFailed {
+        model: "config".into(),
+        func: format!("write {}: {}", path.display(), e),
+    })?;
     Ok(())
 }
 
 pub fn parse_datetime(s: &str) -> BmiResult<i64> {
     let p: Vec<&str> = s.split(&[' ', '-', ':'][..]).collect();
     if p.len() != 6 {
-        return Err(BmiError::FunctionFailed { model: "config".into(), func: format!("Invalid datetime: {}", s) });
+        return Err(BmiError::FunctionFailed {
+            model: "config".into(),
+            func: format!("Invalid datetime: {}", s),
+        });
     }
 
     let parse = |i: usize| -> BmiResult<i64> {
         p[i].parse().map_err(|_| BmiError::FunctionFailed {
-            model: "config".into(), func: format!("Invalid datetime part: {}", p[i])
+            model: "config".into(),
+            func: format!("Invalid datetime part: {}", p[i]),
         })
     };
 
@@ -199,7 +293,9 @@ pub fn parse_datetime(s: &str) -> BmiResult<i64> {
     }
     for m in 1..month {
         days += days_in_month[(m - 1) as usize] as i64;
-        if m == 2 && leap(year) { days += 1; }
+        if m == 2 && leap(year) {
+            days += 1;
+        }
     }
     days += (day - 1) as i64;
 

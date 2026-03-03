@@ -35,7 +35,11 @@ impl std::fmt::Display for UnitConversion {
         } else if (self.scale - 1.0).abs() < 1e-15 {
             write!(f, "{} → {} (+{})", self.from, self.to, self.offset)
         } else {
-            write!(f, "{} → {} (×{} +{})", self.from, self.to, self.scale, self.offset)
+            write!(
+                f,
+                "{} → {} (×{} +{})",
+                self.from, self.to, self.scale, self.offset
+            )
         }
     }
 }
@@ -48,7 +52,11 @@ enum NormalizedUnit {
     Dimensional { category: UnitCategory, to_si: f64 },
     /// Rate unit: quantity per time.
     /// e.g. mm/s = Rate { quantity_to_si: 0.001, time_to_si: 1.0 }
-    Rate { quantity_to_si: f64, quantity_cat: UnitCategory, time_to_si: f64 },
+    Rate {
+        quantity_to_si: f64,
+        quantity_cat: UnitCategory,
+        time_to_si: f64,
+    },
     /// Temperature with special offset handling.
     Temperature(TempUnit),
     /// Mass flux: kg m-2 s-1 (equivalent to mm/s for liquid water).
@@ -89,7 +97,9 @@ pub fn find_conversion(from: &str, to: &str) -> Option<UnitConversion> {
     let to_norm = normalize(to_trimmed);
 
     // If either is unknown, try canonical token matching as a fallback
-    if matches!(from_norm, NormalizedUnit::Unknown(_)) || matches!(to_norm, NormalizedUnit::Unknown(_)) {
+    if matches!(from_norm, NormalizedUnit::Unknown(_))
+        || matches!(to_norm, NormalizedUnit::Unknown(_))
+    {
         return if canonical_tokens_match(from_trimmed, to_trimmed) {
             Some(UnitConversion {
                 from: from_trimmed.into(),
@@ -115,21 +125,33 @@ pub fn find_conversion(from: &str, to: &str) -> Option<UnitConversion> {
     match (&from_norm, &to_norm) {
         // Simple dimensional: same category
         (
-            NormalizedUnit::Dimensional { category: cat_a, to_si: si_a },
-            NormalizedUnit::Dimensional { category: cat_b, to_si: si_b },
-        ) if cat_a == cat_b => {
-            Some(UnitConversion {
-                from: from_trimmed.into(),
-                to: to_trimmed.into(),
-                scale: si_a / si_b,
-                offset: 0.0,
-            })
-        }
+            NormalizedUnit::Dimensional {
+                category: cat_a,
+                to_si: si_a,
+            },
+            NormalizedUnit::Dimensional {
+                category: cat_b,
+                to_si: si_b,
+            },
+        ) if cat_a == cat_b => Some(UnitConversion {
+            from: from_trimmed.into(),
+            to: to_trimmed.into(),
+            scale: si_a / si_b,
+            offset: 0.0,
+        }),
 
         // Rate: same quantity category
         (
-            NormalizedUnit::Rate { quantity_to_si: q_a, quantity_cat: cat_a, time_to_si: t_a },
-            NormalizedUnit::Rate { quantity_to_si: q_b, quantity_cat: cat_b, time_to_si: t_b },
+            NormalizedUnit::Rate {
+                quantity_to_si: q_a,
+                quantity_cat: cat_a,
+                time_to_si: t_a,
+            },
+            NormalizedUnit::Rate {
+                quantity_to_si: q_b,
+                quantity_cat: cat_b,
+                time_to_si: t_b,
+            },
         ) if cat_a == cat_b => {
             // from_si_rate = quantity_to_si / time_to_si
             // conversion = (q_a / t_a) / (q_b / t_b)
@@ -144,7 +166,11 @@ pub fn find_conversion(from: &str, to: &str) -> Option<UnitConversion> {
         // Mass flux ↔ Rate (length/time) — kg m-2 s-1 ≈ mm/s for liquid water (density ≈ 1000 kg/m3)
         (
             NormalizedUnit::MassFlux { time_to_si: t_a },
-            NormalizedUnit::Rate { quantity_to_si: q_b, quantity_cat: UnitCategory::Length, time_to_si: t_b },
+            NormalizedUnit::Rate {
+                quantity_to_si: q_b,
+                quantity_cat: UnitCategory::Length,
+                time_to_si: t_b,
+            },
         ) => {
             // kg m-2 s-1 = 1 mm/s (for water: 1 kg/m2 = 1mm depth)
             // from_value in kg m-2 per t_a seconds, to_value in q_b-units per t_b seconds
@@ -160,7 +186,11 @@ pub fn find_conversion(from: &str, to: &str) -> Option<UnitConversion> {
         }
 
         (
-            NormalizedUnit::Rate { quantity_to_si: q_a, quantity_cat: UnitCategory::Length, time_to_si: t_a },
+            NormalizedUnit::Rate {
+                quantity_to_si: q_a,
+                quantity_cat: UnitCategory::Length,
+                time_to_si: t_a,
+            },
             NormalizedUnit::MassFlux { time_to_si: t_b },
         ) => {
             // Reverse of above
@@ -178,14 +208,12 @@ pub fn find_conversion(from: &str, to: &str) -> Option<UnitConversion> {
         (
             NormalizedUnit::MassFlux { time_to_si: t_a },
             NormalizedUnit::MassFlux { time_to_si: t_b },
-        ) => {
-            Some(UnitConversion {
-                from: from_trimmed.into(),
-                to: to_trimmed.into(),
-                scale: t_b / t_a,
-                offset: 0.0,
-            })
-        }
+        ) => Some(UnitConversion {
+            from: from_trimmed.into(),
+            to: to_trimmed.into(),
+            scale: t_b / t_a,
+            offset: 0.0,
+        }),
 
         // Temperature
         (NormalizedUnit::Temperature(a), NormalizedUnit::Temperature(b)) => {
@@ -220,18 +248,27 @@ fn normalize(s: &str) -> NormalizedUnit {
     let s = s.trim();
 
     // Dimensionless
-    if s.is_empty() || s == "1" || s == "-" || s == "m/m" || s == "m m-1" || s == "none" || s == "dimensionless" {
+    if s.is_empty()
+        || s == "1"
+        || s == "-"
+        || s == "m/m"
+        || s == "m m-1"
+        || s == "none"
+        || s == "dimensionless"
+    {
         return NormalizedUnit::Dimensionless;
     }
 
     // Temperature (standalone)
     match s.to_lowercase().as_str() {
-        "k" | "kelvin" | "degk" | "deg_k" | "degree_kelvin" | "degrees_kelvin"
-            => return NormalizedUnit::Temperature(TempUnit::Kelvin),
-        "c" | "°c" | "degc" | "celsius" | "deg_c" | "degree_celsius" | "degrees_celsius"
-            => return NormalizedUnit::Temperature(TempUnit::Celsius),
-        "f" | "°f" | "degf" | "fahrenheit" | "deg_f" | "degree_fahrenheit" | "degrees_fahrenheit"
-            => return NormalizedUnit::Temperature(TempUnit::Fahrenheit),
+        "k" | "kelvin" | "degk" | "deg_k" | "degree_kelvin" | "degrees_kelvin" => {
+            return NormalizedUnit::Temperature(TempUnit::Kelvin)
+        }
+        "c" | "°c" | "degc" | "celsius" | "deg_c" | "degree_celsius" | "degrees_celsius" => {
+            return NormalizedUnit::Temperature(TempUnit::Celsius)
+        }
+        "f" | "°f" | "degf" | "fahrenheit" | "deg_f" | "degree_fahrenheit"
+        | "degrees_fahrenheit" => return NormalizedUnit::Temperature(TempUnit::Fahrenheit),
         _ => {}
     }
 
@@ -247,7 +284,10 @@ fn normalize(s: &str) -> NormalizedUnit {
 
     // Simple dimensional
     if let Some((cat, to_si)) = lookup_simple(s) {
-        return NormalizedUnit::Dimensional { category: cat, to_si };
+        return NormalizedUnit::Dimensional {
+            category: cat,
+            to_si,
+        };
     }
 
     NormalizedUnit::Unknown(s.into())
@@ -256,7 +296,10 @@ fn normalize(s: &str) -> NormalizedUnit {
 /// Look up a simple (non-rate) unit.
 fn lookup_simple(s: &str) -> Option<(UnitCategory, f64)> {
     let s_lower = s.to_lowercase();
-    SIMPLE_UNITS.iter().find(|(name, _, _)| *name == s_lower).map(|(_, cat, si)| (cat.clone(), *si))
+    SIMPLE_UNITS
+        .iter()
+        .find(|(name, _, _)| *name == s_lower)
+        .map(|(_, cat, si)| (cat.clone(), *si))
 }
 
 /// Look up a quantity unit (for use in rates).
@@ -267,7 +310,10 @@ fn lookup_quantity(s: &str) -> Option<(UnitCategory, f64)> {
 /// Look up a time unit, returning seconds.
 fn lookup_time(s: &str) -> Option<f64> {
     let s_lower = s.to_lowercase();
-    TIME_UNITS.iter().find(|(name, _)| *name == s_lower).map(|(_, secs)| *secs)
+    TIME_UNITS
+        .iter()
+        .find(|(name, _)| *name == s_lower)
+        .map(|(_, secs)| *secs)
 }
 
 /// Try to parse a rate unit string like "mm/s", "mm s^-1", "mm s-1", "mm/hr", "m s^-1".
@@ -291,7 +337,9 @@ fn try_parse_rate(s: &str) -> Option<NormalizedUnit> {
         let (ref qty_tok, _) = tokens[0];
         let (ref time_tok, exp) = tokens[1];
         if exp == -1 {
-            if let (Some((cat, q_si)), Some(t_si)) = (lookup_quantity(qty_tok), lookup_time(time_tok)) {
+            if let (Some((cat, q_si)), Some(t_si)) =
+                (lookup_quantity(qty_tok), lookup_time(time_tok))
+            {
                 return Some(NormalizedUnit::Rate {
                     quantity_to_si: q_si,
                     quantity_cat: cat,
@@ -329,9 +377,15 @@ fn try_parse_mass_flux(s: &str) -> Option<NormalizedUnit> {
     // Pattern: tokenized "kg m^-2 s^-1" etc.
     let tokens = tokenize_unit(s);
     if tokens.len() >= 3 {
-        let has_kg = tokens.iter().any(|(t, e)| t.to_lowercase() == "kg" && *e == 1);
-        let has_m_neg2 = tokens.iter().any(|(t, e)| t.to_lowercase() == "m" && *e == -2);
-        let time_tok = tokens.iter().find(|(t, e)| *e == -1 && lookup_time(t).is_some());
+        let has_kg = tokens
+            .iter()
+            .any(|(t, e)| t.to_lowercase() == "kg" && *e == 1);
+        let has_m_neg2 = tokens
+            .iter()
+            .any(|(t, e)| t.to_lowercase() == "m" && *e == -2);
+        let time_tok = tokens
+            .iter()
+            .find(|(t, e)| *e == -1 && lookup_time(t).is_some());
         if has_kg && has_m_neg2 {
             if let Some((t, _)) = time_tok {
                 let t_si = lookup_time(t).unwrap();
@@ -421,7 +475,9 @@ fn canonicalize(s: &str) -> Vec<(String, i32)> {
     let mut expanded = Vec::new();
     for (base, exp) in tokens {
         if base.len() > 1 {
-            let alpha_end = base.find(|c: char| c.is_ascii_digit()).unwrap_or(base.len());
+            let alpha_end = base
+                .find(|c: char| c.is_ascii_digit())
+                .unwrap_or(base.len());
             if alpha_end > 0 && alpha_end < base.len() {
                 let name = base[..alpha_end].to_string();
                 if let Ok(trailing_exp) = base[alpha_end..].parse::<i32>() {

@@ -18,7 +18,11 @@ impl VarType {
             "int" | "integer" | "int32" | "integer*4" | "integer4" | "i32" => VarType::Int,
             _ if t.contains("double") => VarType::Double,
             _ if t.contains("float") || t.contains("real") => {
-                if item_size == 8 { VarType::Double } else { VarType::Float }
+                if item_size == 8 {
+                    VarType::Double
+                } else {
+                    VarType::Float
+                }
             }
             _ if t.contains("int") => VarType::Int,
             _ => match item_size {
@@ -97,7 +101,9 @@ pub trait Bmi {
     fn get_grid_size(&self, grid: i32) -> BmiResult<i32>;
     fn get_grid_type(&self, grid: i32) -> BmiResult<String>;
 
-    fn time_factor(&self) -> f64 { 1.0 }
+    fn time_factor(&self) -> f64 {
+        1.0
+    }
 
     fn to_seconds(&self, model_time: f64) -> f64 {
         model_time * self.time_factor()
@@ -117,7 +123,11 @@ pub trait Bmi {
         }
 
         let mut cache = HashMap::new();
-        for name in self.get_input_var_names()?.into_iter().chain(self.get_output_var_names()?) {
+        for name in self
+            .get_input_var_names()?
+            .into_iter()
+            .chain(self.get_output_var_names()?)
+        {
             let t = self.get_var_type(&name)?;
             let s = self.get_var_itemsize(&name)?;
             cache.insert(name, VarType::from_bmi(&t, s));
@@ -154,9 +164,13 @@ pub trait BmiExt: Bmi {
         });
 
         match vt {
-            VarType::Float => self.set_value_f32(name, &values.iter().map(|&x| x as f32).collect::<Vec<_>>()),
+            VarType::Float => {
+                self.set_value_f32(name, &values.iter().map(|&x| x as f32).collect::<Vec<_>>())
+            }
             VarType::Double => self.set_value_f64(name, values),
-            VarType::Int => self.set_value_i32(name, &values.iter().map(|&x| x as i32).collect::<Vec<_>>()),
+            VarType::Int => {
+                self.set_value_i32(name, &values.iter().map(|&x| x as i32).collect::<Vec<_>>())
+            }
             VarType::Unknown(t) => Err(BmiError::FunctionFailed {
                 model: self.name().into(),
                 func: format!("unknown type '{}'", t),
@@ -165,10 +179,12 @@ pub trait BmiExt: Bmi {
     }
 
     fn get_scalar(&self, name: &str) -> BmiResult<f64> {
-        self.get_value(name)?.scalar().ok_or_else(|| BmiError::FunctionFailed {
-            model: self.name().into(),
-            func: "empty result".into(),
-        })
+        self.get_value(name)?
+            .scalar()
+            .ok_or_else(|| BmiError::FunctionFailed {
+                model: self.name().into(),
+                func: "empty result".into(),
+            })
     }
 }
 

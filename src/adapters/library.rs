@@ -74,7 +74,9 @@ impl GlobalLibrary {
 impl Drop for GlobalLibrary {
     fn drop(&mut self) {
         if !self.handle.is_null() {
-            unsafe { dlclose(self.handle); }
+            unsafe {
+                dlclose(self.handle);
+            }
         }
     }
 }
@@ -96,6 +98,10 @@ fn preload(name: &str) -> Result<(), ()> {
     unsafe {
         let _ = dlerror();
         let handle = dlopen(cstr.as_ptr(), RTLD_FLAGS);
-        if handle.is_null() { Err(()) } else { Ok(()) }
+        if handle.is_null() {
+            Err(())
+        } else {
+            Ok(())
+        }
     }
 }

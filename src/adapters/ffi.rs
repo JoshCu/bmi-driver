@@ -22,9 +22,11 @@ pub struct Bmi {
     pub get_var_grid: Option<unsafe extern "C" fn(*mut Bmi, *const c_char, *mut c_int) -> c_int>,
     pub get_var_type: Option<unsafe extern "C" fn(*mut Bmi, *const c_char, *mut c_char) -> c_int>,
     pub get_var_units: Option<unsafe extern "C" fn(*mut Bmi, *const c_char, *mut c_char) -> c_int>,
-    pub get_var_itemsize: Option<unsafe extern "C" fn(*mut Bmi, *const c_char, *mut c_int) -> c_int>,
+    pub get_var_itemsize:
+        Option<unsafe extern "C" fn(*mut Bmi, *const c_char, *mut c_int) -> c_int>,
     pub get_var_nbytes: Option<unsafe extern "C" fn(*mut Bmi, *const c_char, *mut c_int) -> c_int>,
-    pub get_var_location: Option<unsafe extern "C" fn(*mut Bmi, *const c_char, *mut c_char) -> c_int>,
+    pub get_var_location:
+        Option<unsafe extern "C" fn(*mut Bmi, *const c_char, *mut c_char) -> c_int>,
 
     pub get_current_time: Option<unsafe extern "C" fn(*mut Bmi, *mut c_double) -> c_int>,
     pub get_start_time: Option<unsafe extern "C" fn(*mut Bmi, *mut c_double) -> c_int>,
@@ -33,11 +35,16 @@ pub struct Bmi {
     pub get_time_step: Option<unsafe extern "C" fn(*mut Bmi, *mut c_double) -> c_int>,
 
     pub get_value: Option<unsafe extern "C" fn(*mut Bmi, *const c_char, *mut c_void) -> c_int>,
-    pub get_value_ptr: Option<unsafe extern "C" fn(*mut Bmi, *const c_char, *mut *mut c_void) -> c_int>,
-    pub get_value_at_indices: Option<unsafe extern "C" fn(*mut Bmi, *const c_char, *mut c_void, *mut c_int, c_int) -> c_int>,
+    pub get_value_ptr:
+        Option<unsafe extern "C" fn(*mut Bmi, *const c_char, *mut *mut c_void) -> c_int>,
+    pub get_value_at_indices: Option<
+        unsafe extern "C" fn(*mut Bmi, *const c_char, *mut c_void, *mut c_int, c_int) -> c_int,
+    >,
 
     pub set_value: Option<unsafe extern "C" fn(*mut Bmi, *const c_char, *mut c_void) -> c_int>,
-    pub set_value_at_indices: Option<unsafe extern "C" fn(*mut Bmi, *const c_char, *mut c_int, c_int, *mut c_void) -> c_int>,
+    pub set_value_at_indices: Option<
+        unsafe extern "C" fn(*mut Bmi, *const c_char, *mut c_int, c_int, *mut c_void) -> c_int,
+    >,
 
     pub get_grid_rank: Option<unsafe extern "C" fn(*mut Bmi, c_int, *mut c_int) -> c_int>,
     pub get_grid_size: Option<unsafe extern "C" fn(*mut Bmi, c_int, *mut c_int) -> c_int>,
