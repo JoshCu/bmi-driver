@@ -37,3 +37,19 @@ pub enum BmiError {
 }
 
 pub type BmiResult<T> = Result<T, BmiError>;
+
+/// Shorthand for creating a `BmiError::FunctionFailed`.
+pub fn function_failed(model: impl Into<String>, msg: impl Into<String>) -> BmiError {
+    BmiError::FunctionFailed {
+        model: model.into(),
+        func: msg.into(),
+    }
+}
+
+/// Shorthand for creating a `BmiError::NotImplemented`.
+pub fn not_implemented(model: impl Into<String>, func: impl Into<String>) -> BmiError {
+    BmiError::NotImplemented {
+        model: model.into(),
+        func: func.into(),
+    }
+}

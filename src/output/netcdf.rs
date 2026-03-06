@@ -5,13 +5,10 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use crate::error::{BmiError, BmiResult};
+use crate::error::{function_failed, BmiError, BmiResult};
 
 fn err(msg: String) -> BmiError {
-    BmiError::FunctionFailed {
-        model: "netcdf_writer".into(),
-        func: msg,
-    }
+    function_failed("netcdf_writer", msg)
 }
 
 /// Suppress HDF5's default error handler which prints verbose diagnostics
@@ -97,7 +94,11 @@ impl NetCdfWriter {
             })
     }
 
-    pub fn finish(mut self) -> BmiResult<()> {
+    pub fn finish_owned(mut self) -> BmiResult<()> {
+        self.shutdown()
+    }
+
+    fn shutdown(&mut self) -> BmiResult<()> {
         let _ = self.sender.send(WriterMessage::Shutdown);
         if let Some(handle) = self.handle.take() {
             handle
@@ -106,6 +107,19 @@ impl NetCdfWriter {
         } else {
             Ok(())
         }
+    }
+}
+
+impl super::DivideDataStore for NetCdfWriter {
+    fn write_location(&mut self, loc_id: &str, columns: &[(String, Vec<f64>)]) -> BmiResult<()> {
+        self.write(LocationResult {
+            location_id: loc_id.to_string(),
+            columns: columns.to_vec(),
+        })
+    }
+
+    fn finish(&mut self) -> BmiResult<()> {
+        self.shutdown()
     }
 }
 
@@ -124,58 +138,39 @@ fn writer_thread(
     let mut batch: Vec<LocationResult> = Vec::new();
     let batch_size = 50;
 
+    let flush_batch = |file: &mut Option<netcdf::FileMut>,
+                           var_names: &mut Vec<String>,
+                           location_count: &mut usize,
+                           batch: &mut Vec<LocationResult>|
+     -> BmiResult<()> {
+        if batch.is_empty() {
+            return Ok(());
+        }
+        if file.is_none() {
+            let (f, names) = init_netcdf(&path, start_time, interval, total_steps, &batch[0])?;
+            *file = Some(f);
+            *var_names = names;
+        }
+        *location_count =
+            write_batch(file.as_mut().unwrap(), batch, var_names, *location_count)?;
+        batch.clear();
+        Ok(())
+    };
+
     loop {
         match receiver.recv_timeout(Duration::from_millis(100)) {
             Ok(WriterMessage::Write(result)) => {
                 batch.push(result);
                 if batch.len() >= batch_size {
-                    if file.is_none() {
-                        let (f, names) =
-                            init_netcdf(&path, start_time, interval, total_steps, &batch[0])?;
-                        file = Some(f);
-                        var_names = names;
-                    }
-                    location_count =
-                        write_batch(file.as_mut().unwrap(), &batch, &var_names, location_count)?;
-                    batch.clear();
+                    flush_batch(&mut file, &mut var_names, &mut location_count, &mut batch)?;
                 }
             }
-            Ok(WriterMessage::Shutdown) => {
-                if !batch.is_empty() {
-                    if file.is_none() {
-                        let (f, names) =
-                            init_netcdf(&path, start_time, interval, total_steps, &batch[0])?;
-                        file = Some(f);
-                        var_names = names;
-                    }
-                    write_batch(file.as_mut().unwrap(), &batch, &var_names, location_count)?;
-                }
+            Ok(WriterMessage::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                flush_batch(&mut file, &mut var_names, &mut location_count, &mut batch)?;
                 break;
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                if !batch.is_empty() {
-                    if file.is_none() {
-                        let (f, names) =
-                            init_netcdf(&path, start_time, interval, total_steps, &batch[0])?;
-                        file = Some(f);
-                        var_names = names;
-                    }
-                    location_count =
-                        write_batch(file.as_mut().unwrap(), &batch, &var_names, location_count)?;
-                    batch.clear();
-                }
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                if !batch.is_empty() {
-                    if file.is_none() {
-                        let (f, names) =
-                            init_netcdf(&path, start_time, interval, total_steps, &batch[0])?;
-                        file = Some(f);
-                        var_names = names;
-                    }
-                    write_batch(file.as_mut().unwrap(), &batch, &var_names, location_count)?;
-                }
-                break;
+                flush_batch(&mut file, &mut var_names, &mut location_count, &mut batch)?;
             }
         }
     }

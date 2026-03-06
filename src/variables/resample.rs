@@ -1,12 +1,9 @@
 use crate::config::{DownsampleMode, UpsampleMode};
-use crate::error::{BmiError, BmiResult};
+use crate::error::{function_failed, BmiResult};
 use std::collections::HashMap;
 
-fn err(msg: String) -> BmiError {
-    BmiError::FunctionFailed {
-        model: "resample".into(),
-        func: msg,
-    }
+fn err(msg: String) -> crate::error::BmiError {
+    function_failed("resample", msg)
 }
 
 /// Resample a single value from a source time series to a destination time.

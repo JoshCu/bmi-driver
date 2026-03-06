@@ -1,10 +1,9 @@
 use std::collections::HashMap;
-use std::ffi::CString;
 use std::os::raw::{c_char, c_void};
 use std::path::Path;
 
-use super::{check_initialized, cstr_to_string};
-use crate::error::{BmiError, BmiResult};
+use super::{check_initialized, cstr_to_string, impl_bmi_drop, to_cstring, verify_config_path};
+use crate::error::{function_failed, not_implemented, BmiError, BmiResult};
 use crate::ffi::{Bmi as BmiStruct, BMI_MAX_NAME, BMI_SUCCESS};
 use crate::library::GlobalLibrary;
 use crate::traits::{parse_time_units, Bmi, VarType};
@@ -100,16 +99,10 @@ impl BmiC {
     where
         F: FnOnce() -> Option<unsafe extern "C" fn(*mut BmiStruct, *mut c_char) -> i32>,
     {
-        let func = f().ok_or_else(|| BmiError::NotImplemented {
-            model: self.name.clone(),
-            func: func_name.into(),
-        })?;
+        let func = f().ok_or_else(|| not_implemented(&self.name, func_name))?;
         let mut buf = vec![0u8; BMI_MAX_NAME];
         if unsafe { func(self.ptr(), buf.as_mut_ptr() as *mut c_char) } != BMI_SUCCESS {
-            return Err(BmiError::FunctionFailed {
-                model: self.name.clone(),
-                func: func_name.into(),
-            });
+            return Err(function_failed(&self.name, func_name));
         }
         cstr_to_string(&buf)
     }
@@ -118,16 +111,10 @@ impl BmiC {
     where
         F: FnOnce() -> Option<unsafe extern "C" fn(*mut BmiStruct, *mut i32) -> i32>,
     {
-        let func = f().ok_or_else(|| BmiError::NotImplemented {
-            model: self.name.clone(),
-            func: func_name.into(),
-        })?;
+        let func = f().ok_or_else(|| not_implemented(&self.name, func_name))?;
         let mut val = 0i32;
         if unsafe { func(self.ptr(), &mut val) } != BMI_SUCCESS {
-            return Err(BmiError::FunctionFailed {
-                model: self.name.clone(),
-                func: func_name.into(),
-            });
+            return Err(function_failed(&self.name, func_name));
         }
         Ok(val)
     }
@@ -136,16 +123,10 @@ impl BmiC {
     where
         F: FnOnce() -> Option<unsafe extern "C" fn(*mut BmiStruct, *mut f64) -> i32>,
     {
-        let func = f().ok_or_else(|| BmiError::NotImplemented {
-            model: self.name.clone(),
-            func: func_name.into(),
-        })?;
+        let func = f().ok_or_else(|| not_implemented(&self.name, func_name))?;
         let mut val = 0.0f64;
         if unsafe { func(self.ptr(), &mut val) } != BMI_SUCCESS {
-            return Err(BmiError::FunctionFailed {
-                model: self.name.clone(),
-                func: func_name.into(),
-            });
+            return Err(function_failed(&self.name, func_name));
         }
         Ok(val)
     }
@@ -156,19 +137,13 @@ impl BmiC {
         func: Option<unsafe extern "C" fn(*mut BmiStruct, *const c_char, *mut c_char) -> i32>,
         name: &str,
     ) -> BmiResult<String> {
-        let func = func.ok_or_else(|| BmiError::NotImplemented {
-            model: self.name.clone(),
-            func: func_name.into(),
-        })?;
-        let cname = CString::new(name).map_err(|_| BmiError::InvalidUtf8)?;
+        let func = func.ok_or_else(|| not_implemented(&self.name, func_name))?;
+        let cname = to_cstring(name)?;
         let mut buf = vec![0u8; BMI_MAX_NAME];
         if unsafe { func(self.ptr(), cname.as_ptr(), buf.as_mut_ptr() as *mut c_char) }
             != BMI_SUCCESS
         {
-            return Err(BmiError::FunctionFailed {
-                model: self.name.clone(),
-                func: func_name.into(),
-            });
+            return Err(function_failed(&self.name, func_name));
         }
         cstr_to_string(&buf)
     }
@@ -179,17 +154,11 @@ impl BmiC {
         func: Option<unsafe extern "C" fn(*mut BmiStruct, *const c_char, *mut i32) -> i32>,
         name: &str,
     ) -> BmiResult<i32> {
-        let func = func.ok_or_else(|| BmiError::NotImplemented {
-            model: self.name.clone(),
-            func: func_name.into(),
-        })?;
-        let cname = CString::new(name).map_err(|_| BmiError::InvalidUtf8)?;
+        let func = func.ok_or_else(|| not_implemented(&self.name, func_name))?;
+        let cname = to_cstring(name)?;
         let mut val = 0i32;
         if unsafe { func(self.ptr(), cname.as_ptr(), &mut val) } != BMI_SUCCESS {
-            return Err(BmiError::FunctionFailed {
-                model: self.name.clone(),
-                func: func_name.into(),
-            });
+            return Err(function_failed(&self.name, func_name));
         }
         Ok(val)
     }
@@ -200,20 +169,14 @@ impl BmiC {
         func: Option<unsafe extern "C" fn(*mut BmiStruct, *mut *mut c_char) -> i32>,
         count: usize,
     ) -> BmiResult<Vec<String>> {
-        let func = func.ok_or_else(|| BmiError::NotImplemented {
-            model: self.name.clone(),
-            func: func_name.into(),
-        })?;
+        let func = func.ok_or_else(|| not_implemented(&self.name, func_name))?;
         let mut bufs: Vec<Vec<u8>> = (0..count).map(|_| vec![0u8; BMI_MAX_NAME]).collect();
         let mut ptrs: Vec<*mut c_char> = bufs
             .iter_mut()
             .map(|b| b.as_mut_ptr() as *mut c_char)
             .collect();
         if unsafe { func(self.ptr(), ptrs.as_mut_ptr()) } != BMI_SUCCESS {
-            return Err(BmiError::FunctionFailed {
-                model: self.name.clone(),
-                func: func_name.into(),
-            });
+            return Err(function_failed(&self.name, func_name));
         }
         bufs.iter().map(|b| cstr_to_string(b)).collect()
     }
@@ -242,25 +205,15 @@ impl Bmi for BmiC {
                 model: self.name.clone(),
             });
         }
-        if !Path::new(config).exists() {
-            return Err(BmiError::ConfigNotFound {
-                path: config.into(),
-            });
-        }
+        verify_config_path(config)?;
 
         let func = self
             .bmi
             .initialize
-            .ok_or_else(|| BmiError::NotImplemented {
-                model: self.name.clone(),
-                func: "initialize".into(),
-            })?;
-        let cconfig = CString::new(config).map_err(|_| BmiError::InvalidUtf8)?;
+            .ok_or_else(|| not_implemented(&self.name, "initialize"))?;
+        let cconfig = to_cstring(config)?;
         if unsafe { func(self.bmi.as_mut(), cconfig.as_ptr()) } != BMI_SUCCESS {
-            return Err(BmiError::FunctionFailed {
-                model: self.name.clone(),
-                func: "initialize".into(),
-            });
+            return Err(function_failed(&self.name, "initialize"));
         }
 
         self.initialized = true;
@@ -274,15 +227,12 @@ impl Bmi for BmiC {
 
     fn update(&mut self) -> BmiResult<()> {
         check_initialized(self.initialized, &self.name)?;
-        let func = self.bmi.update.ok_or_else(|| BmiError::NotImplemented {
-            model: self.name.clone(),
-            func: "update".into(),
-        })?;
+        let func = self
+            .bmi
+            .update
+            .ok_or_else(|| not_implemented(&self.name, "update"))?;
         if unsafe { func(self.bmi.as_mut()) } != BMI_SUCCESS {
-            return Err(BmiError::FunctionFailed {
-                model: self.name.clone(),
-                func: "update".into(),
-            });
+            return Err(function_failed(&self.name, "update"));
         }
         Ok(())
     }
@@ -292,15 +242,9 @@ impl Bmi for BmiC {
         let func = self
             .bmi
             .update_until
-            .ok_or_else(|| BmiError::NotImplemented {
-                model: self.name.clone(),
-                func: "update_until".into(),
-            })?;
+            .ok_or_else(|| not_implemented(&self.name, "update_until"))?;
         if unsafe { func(self.bmi.as_mut(), time) } != BMI_SUCCESS {
-            return Err(BmiError::FunctionFailed {
-                model: self.name.clone(),
-                func: "update_until".into(),
-            });
+            return Err(function_failed(&self.name, "update_until"));
         }
         Ok(())
     }
@@ -309,17 +253,14 @@ impl Bmi for BmiC {
         if !self.initialized {
             return Ok(());
         }
-        let func = self.bmi.finalize.ok_or_else(|| BmiError::NotImplemented {
-            model: self.name.clone(),
-            func: "finalize".into(),
-        })?;
+        let func = self
+            .bmi
+            .finalize
+            .ok_or_else(|| not_implemented(&self.name, "finalize"))?;
         let result = unsafe { func(self.bmi.as_mut()) };
         self.initialized = false;
         if result != BMI_SUCCESS {
-            return Err(BmiError::FunctionFailed {
-                model: self.name.clone(),
-                func: "finalize".into(),
-            });
+            return Err(function_failed(&self.name, "finalize"));
         }
         Ok(())
     }
@@ -405,73 +346,68 @@ impl Bmi for BmiC {
         self.call_double("get_time_step", || self.bmi.get_time_step)
     }
 
+    // TODO: get_value_f64/f32/i32 and set_value_f64/f32/i32 could use a generic helper
+    // to reduce duplication across the three typed variants. Deferred because the unsafe
+    // FFI calls need careful attention.
+
     fn get_value_f64(&self, name: &str) -> BmiResult<Vec<f64>> {
         check_initialized(self.initialized, &self.name)?;
-        let func = self.bmi.get_value.ok_or_else(|| BmiError::NotImplemented {
-            model: self.name.clone(),
-            func: "get_value".into(),
-        })?;
+        let func = self
+            .bmi
+            .get_value
+            .ok_or_else(|| not_implemented(&self.name, "get_value"))?;
         let count = self.get_var_nbytes(name)? as usize / std::mem::size_of::<f64>();
         let mut vals = vec![0.0f64; count];
-        let cname = CString::new(name).map_err(|_| BmiError::InvalidUtf8)?;
+        let cname = to_cstring(name)?;
         if unsafe { func(self.ptr(), cname.as_ptr(), vals.as_mut_ptr() as *mut c_void) }
             != BMI_SUCCESS
         {
-            return Err(BmiError::FunctionFailed {
-                model: self.name.clone(),
-                func: "get_value".into(),
-            });
+            return Err(function_failed(&self.name, "get_value"));
         }
         Ok(vals)
     }
 
     fn get_value_f32(&self, name: &str) -> BmiResult<Vec<f32>> {
         check_initialized(self.initialized, &self.name)?;
-        let func = self.bmi.get_value.ok_or_else(|| BmiError::NotImplemented {
-            model: self.name.clone(),
-            func: "get_value".into(),
-        })?;
+        let func = self
+            .bmi
+            .get_value
+            .ok_or_else(|| not_implemented(&self.name, "get_value"))?;
         let count = self.get_var_nbytes(name)? as usize / std::mem::size_of::<f32>();
         let mut vals = vec![0.0f32; count];
-        let cname = CString::new(name).map_err(|_| BmiError::InvalidUtf8)?;
+        let cname = to_cstring(name)?;
         if unsafe { func(self.ptr(), cname.as_ptr(), vals.as_mut_ptr() as *mut c_void) }
             != BMI_SUCCESS
         {
-            return Err(BmiError::FunctionFailed {
-                model: self.name.clone(),
-                func: "get_value".into(),
-            });
+            return Err(function_failed(&self.name, "get_value"));
         }
         Ok(vals)
     }
 
     fn get_value_i32(&self, name: &str) -> BmiResult<Vec<i32>> {
         check_initialized(self.initialized, &self.name)?;
-        let func = self.bmi.get_value.ok_or_else(|| BmiError::NotImplemented {
-            model: self.name.clone(),
-            func: "get_value".into(),
-        })?;
+        let func = self
+            .bmi
+            .get_value
+            .ok_or_else(|| not_implemented(&self.name, "get_value"))?;
         let count = self.get_var_nbytes(name)? as usize / std::mem::size_of::<i32>();
         let mut vals = vec![0i32; count];
-        let cname = CString::new(name).map_err(|_| BmiError::InvalidUtf8)?;
+        let cname = to_cstring(name)?;
         if unsafe { func(self.ptr(), cname.as_ptr(), vals.as_mut_ptr() as *mut c_void) }
             != BMI_SUCCESS
         {
-            return Err(BmiError::FunctionFailed {
-                model: self.name.clone(),
-                func: "get_value".into(),
-            });
+            return Err(function_failed(&self.name, "get_value"));
         }
         Ok(vals)
     }
 
     fn set_value_f64(&mut self, name: &str, values: &[f64]) -> BmiResult<()> {
         check_initialized(self.initialized, &self.name)?;
-        let func = self.bmi.set_value.ok_or_else(|| BmiError::NotImplemented {
-            model: self.name.clone(),
-            func: "set_value".into(),
-        })?;
-        let cname = CString::new(name).map_err(|_| BmiError::InvalidUtf8)?;
+        let func = self
+            .bmi
+            .set_value
+            .ok_or_else(|| not_implemented(&self.name, "set_value"))?;
+        let cname = to_cstring(name)?;
         if unsafe {
             func(
                 self.bmi.as_mut(),
@@ -480,21 +416,18 @@ impl Bmi for BmiC {
             )
         } != BMI_SUCCESS
         {
-            return Err(BmiError::FunctionFailed {
-                model: self.name.clone(),
-                func: "set_value".into(),
-            });
+            return Err(function_failed(&self.name, "set_value"));
         }
         Ok(())
     }
 
     fn set_value_f32(&mut self, name: &str, values: &[f32]) -> BmiResult<()> {
         check_initialized(self.initialized, &self.name)?;
-        let func = self.bmi.set_value.ok_or_else(|| BmiError::NotImplemented {
-            model: self.name.clone(),
-            func: "set_value".into(),
-        })?;
-        let cname = CString::new(name).map_err(|_| BmiError::InvalidUtf8)?;
+        let func = self
+            .bmi
+            .set_value
+            .ok_or_else(|| not_implemented(&self.name, "set_value"))?;
+        let cname = to_cstring(name)?;
         if unsafe {
             func(
                 self.bmi.as_mut(),
@@ -503,21 +436,18 @@ impl Bmi for BmiC {
             )
         } != BMI_SUCCESS
         {
-            return Err(BmiError::FunctionFailed {
-                model: self.name.clone(),
-                func: "set_value".into(),
-            });
+            return Err(function_failed(&self.name, "set_value"));
         }
         Ok(())
     }
 
     fn set_value_i32(&mut self, name: &str, values: &[i32]) -> BmiResult<()> {
         check_initialized(self.initialized, &self.name)?;
-        let func = self.bmi.set_value.ok_or_else(|| BmiError::NotImplemented {
-            model: self.name.clone(),
-            func: "set_value".into(),
-        })?;
-        let cname = CString::new(name).map_err(|_| BmiError::InvalidUtf8)?;
+        let func = self
+            .bmi
+            .set_value
+            .ok_or_else(|| not_implemented(&self.name, "set_value"))?;
+        let cname = to_cstring(name)?;
         if unsafe {
             func(
                 self.bmi.as_mut(),
@@ -526,10 +456,7 @@ impl Bmi for BmiC {
             )
         } != BMI_SUCCESS
         {
-            return Err(BmiError::FunctionFailed {
-                model: self.name.clone(),
-                func: "set_value".into(),
-            });
+            return Err(function_failed(&self.name, "set_value"));
         }
         Ok(())
     }
@@ -539,16 +466,10 @@ impl Bmi for BmiC {
         let func = self
             .bmi
             .get_grid_rank
-            .ok_or_else(|| BmiError::NotImplemented {
-                model: self.name.clone(),
-                func: "get_grid_rank".into(),
-            })?;
+            .ok_or_else(|| not_implemented(&self.name, "get_grid_rank"))?;
         let mut val = 0i32;
         if unsafe { func(self.ptr(), grid, &mut val) } != BMI_SUCCESS {
-            return Err(BmiError::FunctionFailed {
-                model: self.name.clone(),
-                func: "get_grid_rank".into(),
-            });
+            return Err(function_failed(&self.name, "get_grid_rank"));
         }
         Ok(val)
     }
@@ -558,16 +479,10 @@ impl Bmi for BmiC {
         let func = self
             .bmi
             .get_grid_size
-            .ok_or_else(|| BmiError::NotImplemented {
-                model: self.name.clone(),
-                func: "get_grid_size".into(),
-            })?;
+            .ok_or_else(|| not_implemented(&self.name, "get_grid_size"))?;
         let mut val = 0i32;
         if unsafe { func(self.ptr(), grid, &mut val) } != BMI_SUCCESS {
-            return Err(BmiError::FunctionFailed {
-                model: self.name.clone(),
-                func: "get_grid_size".into(),
-            });
+            return Err(function_failed(&self.name, "get_grid_size"));
         }
         Ok(val)
     }
@@ -577,25 +492,13 @@ impl Bmi for BmiC {
         let func = self
             .bmi
             .get_grid_type
-            .ok_or_else(|| BmiError::NotImplemented {
-                model: self.name.clone(),
-                func: "get_grid_type".into(),
-            })?;
+            .ok_or_else(|| not_implemented(&self.name, "get_grid_type"))?;
         let mut buf = vec![0u8; BMI_MAX_NAME];
         if unsafe { func(self.ptr(), grid, buf.as_mut_ptr() as *mut c_char) } != BMI_SUCCESS {
-            return Err(BmiError::FunctionFailed {
-                model: self.name.clone(),
-                func: "get_grid_type".into(),
-            });
+            return Err(function_failed(&self.name, "get_grid_type"));
         }
         cstr_to_string(&buf)
     }
 }
 
-impl Drop for BmiC {
-    fn drop(&mut self) {
-        if self.initialized {
-            let _ = self.finalize();
-        }
-    }
-}
+impl_bmi_drop!(BmiC);

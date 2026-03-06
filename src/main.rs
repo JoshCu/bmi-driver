@@ -1,4 +1,4 @@
-use bmi_driver::{preload_dependencies, BmiError, ModelRunner, OutputFormat};
+use bmi_driver::{preload_dependencies, BmiError, DivideDataStore, ModelRunner, OutputFormat};
 use clap::Parser;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::env;
@@ -139,7 +139,7 @@ fn main() -> Result<(), BmiError> {
 
     if let (Some(start), Some(end)) = (args.worker_start, args.worker_end) {
         let output_path = data_dir.join("outputs").join("bmi-driver");
-        run_worker(&realization, &locations[start..end], &output_path, start, &args.output_vars)
+        run_worker(&realization, &locations[start..end], &output_path, start)
     } else {
         run_parent(&data_dir, &realization, &locations, jobs, progress)
     }
@@ -149,7 +149,7 @@ fn print_units(realization: &PathBuf, locations: &[String]) -> Result<(), BmiErr
     let mut runner = ModelRunner::from_config(realization)?;
     if let Some(loc) = locations.first() {
         runner.initialize(loc)?;
-        runner.print_all_unit_info();
+        runner.print_unit_conversions(false);
         runner.finalize()?;
     } else {
         eprintln!("No locations found.");
@@ -227,15 +227,15 @@ fn run_parent(
                     // Re-initialize with updated config to show new conversions
                     let mut runner2 = ModelRunner::from_config(realization)?;
                     runner2.initialize(loc)?;
-                    runner2.print_active_conversions();
+                    runner2.print_unit_conversions(true);
                     runner2.finalize()?;
                 } else {
                     eprintln!("Skipping. Running with current config.");
-                    runner.print_active_conversions();
+                    runner.print_unit_conversions(true);
                     runner.finalize()?;
                 }
             } else {
-                runner.print_active_conversions();
+                runner.print_unit_conversions(true);
                 runner.finalize()?;
             }
         }
@@ -514,7 +514,6 @@ fn run_worker(
     locations: &[String],
     output_path: &PathBuf,
     #[cfg_attr(not(feature = "zarr"), allow(unused))] global_start: usize,
-    #[cfg_attr(not(feature = "zarr"), allow(unused))] cli_output_vars: &Option<String>,
 ) -> Result<(), BmiError> {
     let mut runner = ModelRunner::from_config(realization)?;
     runner.suppress_warnings = true;
@@ -529,158 +528,24 @@ fn run_worker(
         .map(|f| f.params.output_variables.clone())
         .unwrap_or_default();
 
+    let mut store = create_output_store(
+        output_format,
+        output_path,
+        &runner,
+        start_epoch,
+        interval,
+        global_start,
+        locations.first().map(|s| s.as_str()),
+    )?;
+
     let report_interval = ((locations.len() as f64) * 0.01).ceil().max(1.0) as usize;
 
-    match output_format {
-        OutputFormat::Csv => run_worker_csv(
-            &mut runner,
-            locations,
-            output_path,
-            &output_vars,
-            start_epoch,
-            interval,
-            report_interval,
-        ),
-        OutputFormat::Netcdf => run_worker_netcdf(
-            &mut runner,
-            locations,
-            output_path,
-            &output_vars,
-            report_interval,
-        ),
-        #[cfg(feature = "zarr")]
-        OutputFormat::Zarr => {
-            let zarr_vars: Vec<String> = cli_output_vars
-                .as_deref()
-                .unwrap_or("")
-                .split(',')
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_string())
-                .collect();
-            run_worker_zarr(
-                &mut runner,
-                locations,
-                output_path,
-                &output_vars,
-                &zarr_vars,
-                global_start,
-                report_interval,
-            )
-        }
-    }
-}
-
-fn run_worker_csv(
-    runner: &mut ModelRunner,
-    locations: &[String],
-    output_path: &PathBuf,
-    output_vars: &[String],
-    start_epoch: i64,
-    interval: i64,
-    report_interval: usize,
-) -> Result<(), BmiError> {
     for (i, location) in locations.iter().enumerate() {
         runner.initialize(location)?;
         runner.run()?;
 
-        let columns: Vec<(&str, &Vec<f64>)> = if output_vars.is_empty() {
-            runner
-                .outputs
-                .iter()
-                .map(|(name, vals)| (name.as_str(), vals))
-                .collect()
-        } else {
-            output_vars
-                .iter()
-                .filter_map(|name| runner.outputs(name).ok().map(|vals| (name.as_str(), vals)))
-                .collect()
-        };
-
-        let csv_path = output_path.join(format!("{}.csv", location));
-        let mut csv = String::from("Time Step,Time");
-        for (name, _) in &columns {
-            csv.push(',');
-            csv.push_str(name);
-        }
-        csv.push('\n');
-
-        let n_steps = columns.first().map(|(_, v)| v.len()).unwrap_or(0);
-        for step in 0..n_steps {
-            let ts = start_epoch + (step as i64) * interval;
-            csv.push_str(&format!("{},{}", step, format_epoch(ts)));
-            for (_, vals) in &columns {
-                csv.push_str(&format!(",{:.9}", vals[step]));
-            }
-            csv.push('\n');
-        }
-
-        fs::write(&csv_path, csv).map_err(|e| BmiError::FunctionFailed {
-            model: "runner".into(),
-            func: format!("Failed to write {}: {}", csv_path.display(), e),
-        })?;
-
-        runner.finalize()?;
-
-        if (i + 1) % report_interval == 0 || i + 1 == locations.len() {
-            println!("{}", i + 1);
-        }
-    }
-    Ok(())
-}
-
-fn run_worker_netcdf(
-    runner: &mut ModelRunner,
-    locations: &[String],
-    output_path: &PathBuf,
-    output_vars: &[String],
-    report_interval: usize,
-) -> Result<(), BmiError> {
-    use bmi_driver::output::netcdf::{LocationResult, NetCdfWriter};
-
-    // Determine the worker's tmp file name from the first location
-    let tmp_name = if let Some(first) = locations.first() {
-        format!("tmp_{}.nc", first)
-    } else {
-        return Ok(());
-    };
-    let nc_path = output_path.join(&tmp_name);
-
-    let start_time = runner.config.time.start_time.clone();
-    let interval = runner.config.time.output_interval;
-    // Calculate total_steps from config directly — runner.total_steps is 0
-    // until initialize() is called, but we need it before the first initialize().
-    let start_epoch = bmi_driver::parse_datetime(&start_time)?;
-    let end_epoch = bmi_driver::parse_datetime(&runner.config.time.end_time)?;
-    let total_steps = ((end_epoch - start_epoch) / interval) as usize;
-
-    let writer = NetCdfWriter::new(nc_path, &start_time, interval, total_steps)?;
-
-    for (i, location) in locations.iter().enumerate() {
-        runner.initialize(location)?;
-        runner.run()?;
-
-        let columns: Vec<(String, Vec<f64>)> = if output_vars.is_empty() {
-            runner
-                .outputs
-                .iter()
-                .map(|(name, vals)| (name.clone(), vals.clone()))
-                .collect()
-        } else {
-            output_vars
-                .iter()
-                .filter_map(|name| {
-                    runner
-                        .outputs(name)
-                        .ok()
-                        .map(|vals| (name.clone(), vals.clone()))
-                })
-                .collect()
-        };
-
-        writer.write(LocationResult {
-            location_id: location.clone(),
-            columns,
-        })?;
+        let columns = collect_columns(&runner, &output_vars);
+        store.write_location(location, &columns)?;
 
         runner.finalize()?;
 
@@ -689,98 +554,65 @@ fn run_worker_netcdf(
         }
     }
 
-    writer.finish()?;
+    store.finish()?;
     Ok(())
 }
 
-#[cfg(feature = "zarr")]
-fn run_worker_zarr(
-    runner: &mut ModelRunner,
-    locations: &[String],
-    output_path: &PathBuf,
-    output_vars: &[String],
-    zarr_vars: &[String],
-    global_start: usize,
-    report_interval: usize,
-) -> Result<(), BmiError> {
-    let zarr_path = output_path.join("results.zarr");
-
-    // Use zarr_vars (from parent's --output-vars) if output_vars (from config) is empty
-    let effective_vars = if output_vars.is_empty() {
-        zarr_vars
+fn collect_columns(runner: &ModelRunner, output_vars: &[String]) -> Vec<(String, Vec<f64>)> {
+    if output_vars.is_empty() {
+        runner
+            .outputs
+            .iter()
+            .map(|(name, vals)| (name.clone(), vals.clone()))
+            .collect()
     } else {
         output_vars
-    };
-
-    for (i, location) in locations.iter().enumerate() {
-        runner.initialize(location)?;
-        runner.run()?;
-
-        let columns: Vec<(String, Vec<f64>)> = if effective_vars.is_empty() {
-            runner
-                .outputs
-                .iter()
-                .map(|(name, vals)| (name.clone(), vals.clone()))
-                .collect()
-        } else {
-            effective_vars
-                .iter()
-                .filter_map(|name| {
-                    runner
-                        .outputs(name)
-                        .ok()
-                        .map(|vals| (name.clone(), vals.clone()))
-                })
-                .collect()
-        };
-
-        bmi_driver::output::zarr::write_location(&zarr_path, global_start + i, &columns)?;
-
-        runner.finalize()?;
-
-        if (i + 1) % report_interval == 0 || i + 1 == locations.len() {
-            println!("{}", i + 1);
-        }
+            .iter()
+            .filter_map(|name| {
+                runner
+                    .outputs(name)
+                    .ok()
+                    .map(|vals| (name.clone(), vals.clone()))
+            })
+            .collect()
     }
-    Ok(())
 }
 
-fn format_epoch(epoch: i64) -> String {
-    let secs_per_day: i64 = 86400;
-    let mut remaining = epoch;
-    let sec = remaining % 60;
-    remaining /= 60;
-    let min = remaining % 60;
-    remaining /= 60;
-    let hour = remaining % 24;
-    let mut days = epoch / secs_per_day;
-
-    let leap = |y: i32| (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
-    let days_in_month = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-
-    let mut year = 1970i32;
-    loop {
-        let yd = if leap(year) { 366 } else { 365 };
-        if days < yd {
-            break;
+fn create_output_store(
+    format: OutputFormat,
+    output_path: &PathBuf,
+    runner: &ModelRunner,
+    start_epoch: i64,
+    interval: i64,
+    #[cfg_attr(not(feature = "zarr"), allow(unused))] global_start: usize,
+    first_location: Option<&str>,
+) -> Result<Box<dyn DivideDataStore>, BmiError> {
+    match format {
+        OutputFormat::Csv => Ok(Box::new(bmi_driver::output::csv::CsvStore::new(
+            output_path.clone(),
+            start_epoch,
+            interval,
+        ))),
+        OutputFormat::Netcdf => {
+            let first_loc = first_location.unwrap_or("output");
+            let nc_path = output_path.join(format!("tmp_{}.nc", first_loc));
+            let start_time = &runner.config.time.start_time;
+            let end_epoch = bmi_driver::parse_datetime(&runner.config.time.end_time)?;
+            let total_steps = ((end_epoch - start_epoch) / interval) as usize;
+            Ok(Box::new(bmi_driver::output::netcdf::NetCdfWriter::new(
+                nc_path,
+                start_time,
+                interval,
+                total_steps,
+            )?))
         }
-        days -= yd;
-        year += 1;
-    }
-
-    let mut month = 0u32;
-    for m in 0..12 {
-        let md = days_in_month[m] as i64 + if m == 1 && leap(year) { 1 } else { 0 };
-        if days < md {
-            month = m as u32 + 1;
-            break;
+        #[cfg(feature = "zarr")]
+        OutputFormat::Zarr => {
+            let zarr_path = output_path.join("results.zarr");
+            Ok(Box::new(bmi_driver::output::zarr::ZarrStore::new(
+                zarr_path,
+                global_start,
+            )))
         }
-        days -= md;
     }
-    let day = days + 1;
-
-    format!(
-        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
-        year, month, day, hour, min, sec
-    )
 }

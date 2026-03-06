@@ -3,8 +3,8 @@ use std::path::Path;
 
 use pyo3::prelude::*;
 
-use super::check_initialized;
-use crate::error::{BmiError, BmiResult};
+use super::{check_initialized, impl_bmi_drop, verify_config_path};
+use crate::error::{function_failed, BmiError, BmiResult};
 use crate::traits::{parse_time_units, Bmi, VarType};
 
 /// BMI adapter for Python classes implementing the BMI interface.
@@ -76,13 +76,13 @@ impl BmiPython {
 
         let dot_pos = python_type
             .rfind('.')
-            .ok_or_else(|| BmiError::FunctionFailed {
-                model: name.clone(),
-                func: format!(
+            .ok_or_else(|| function_failed(
+                name.clone(),
+                format!(
                     "python_type '{}' must be a dotted path like 'package.module.ClassName'",
                     python_type
                 ),
-            })?;
+            ))?;
         let module_path = &python_type[..dot_pos];
         let class_name = &python_type[dot_pos + 1..];
 
@@ -90,10 +90,7 @@ impl BmiPython {
             let instance = py.import_bound(module_path)?.getattr(class_name)?.call0()?;
             Ok(instance.unbind())
         })
-        .map_err(|e| BmiError::FunctionFailed {
-            model: name.clone(),
-            func: format!("load_from_type: {e}"),
-        })?;
+        .map_err(|e| function_failed(name.clone(), format!("load_from_type: {e}")))?;
 
         Ok(Self {
             model_name: name,
@@ -127,10 +124,7 @@ impl BmiPython {
             let instance = py.import_bound(stem)?.getattr(class_name)?.call0()?;
             Ok(instance.unbind())
         })
-        .map_err(|e| BmiError::FunctionFailed {
-            model: name.clone(),
-            func: format!("load: {e}"),
-        })?;
+        .map_err(|e| function_failed(name.clone(), format!("load: {e}")))?;
 
         Ok(Self {
             model_name: name,
@@ -241,11 +235,7 @@ impl Bmi for BmiPython {
                 model: self.model_name.clone(),
             });
         }
-        if !Path::new(config).exists() {
-            return Err(BmiError::ConfigNotFound {
-                path: config.into(),
-            });
-        }
+        verify_config_path(config)?;
         Python::with_gil(|py| {
             self.obj
                 .call_method1(py, "initialize", (config,))
@@ -443,10 +433,4 @@ impl Bmi for BmiPython {
     }
 }
 
-impl Drop for BmiPython {
-    fn drop(&mut self) {
-        if self.initialized {
-            let _ = self.finalize();
-        }
-    }
-}
+impl_bmi_drop!(BmiPython);

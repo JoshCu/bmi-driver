@@ -1,10 +1,9 @@
 use std::collections::HashMap;
-use std::ffi::CString;
 use std::os::raw::{c_char, c_double, c_float, c_int, c_void};
 use std::path::Path;
 
-use super::{check_initialized, cstr_to_string};
-use crate::error::{BmiError, BmiResult};
+use super::{check_initialized, cstr_to_string, impl_bmi_drop, to_cstring, verify_config_path};
+use crate::error::{function_failed, BmiError, BmiResult};
 use crate::ffi::BMI_MAX_NAME;
 use crate::library::GlobalLibrary;
 use crate::traits::{parse_time_units, Bmi, VarType};
@@ -160,10 +159,7 @@ impl BmiFortran {
         }
 
         if handle.is_null() {
-            return Err(BmiError::FunctionFailed {
-                model: name,
-                func: reg_func.into(),
-            });
+            return Err(function_failed(name, reg_func));
         }
 
         let fns = Self::load_fns(&middleware_lib)?;
@@ -205,10 +201,7 @@ impl BmiFortran {
         }
 
         if handle.is_null() {
-            return Err(BmiError::FunctionFailed {
-                model: name,
-                func: reg_func.into(),
-            });
+            return Err(function_failed(name, reg_func));
         }
 
         let fns = Self::load_fns(&lib)?;
@@ -271,12 +264,6 @@ impl BmiFortran {
         &mut self.handle as *mut *mut c_void as *mut c_void
     }
 
-    fn err(&self, func: &str) -> BmiError {
-        BmiError::FunctionFailed {
-            model: self.model_name.clone(),
-            func: func.into(),
-        }
-    }
 }
 
 impl Bmi for BmiFortran {
@@ -302,15 +289,11 @@ impl Bmi for BmiFortran {
                 model: self.model_name.clone(),
             });
         }
-        if !Path::new(config).exists() {
-            return Err(BmiError::ConfigNotFound {
-                path: config.into(),
-            });
-        }
+        verify_config_path(config)?;
 
-        let cconfig = CString::new(config).map_err(|_| BmiError::InvalidUtf8)?;
+        let cconfig = to_cstring(config)?;
         if unsafe { (self.fns.initialize)(self.handle_ptr_mut(), cconfig.as_ptr()) } != 0 {
-            return Err(self.err("initialize"));
+            return Err(function_failed(&self.model_name,"initialize"));
         }
 
         self.initialized = true;
@@ -325,7 +308,7 @@ impl Bmi for BmiFortran {
     fn update(&mut self) -> BmiResult<()> {
         check_initialized(self.initialized, &self.model_name)?;
         if unsafe { (self.fns.update)(self.handle_ptr_mut()) } != 0 {
-            return Err(self.err("update"));
+            return Err(function_failed(&self.model_name,"update"));
         }
         Ok(())
     }
@@ -334,7 +317,7 @@ impl Bmi for BmiFortran {
         check_initialized(self.initialized, &self.model_name)?;
         let mut t = time;
         if unsafe { (self.fns.update_until)(self.handle_ptr_mut(), &mut t) } != 0 {
-            return Err(self.err("update_until"));
+            return Err(function_failed(&self.model_name,"update_until"));
         }
         Ok(())
     }
@@ -346,7 +329,7 @@ impl Bmi for BmiFortran {
         let result = unsafe { (self.fns.finalize)(self.handle_ptr_mut()) };
         self.initialized = false;
         if result != 0 {
-            return Err(self.err("finalize"));
+            return Err(function_failed(&self.model_name,"finalize"));
         }
         Ok(())
     }
@@ -357,7 +340,7 @@ impl Bmi for BmiFortran {
             (self.fns.get_component_name)(self.handle_ptr(), buf.as_mut_ptr() as *mut c_char)
         } != 0
         {
-            return Err(self.err("get_component_name"));
+            return Err(function_failed(&self.model_name,"get_component_name"));
         }
         cstr_to_string(&buf)
     }
@@ -366,7 +349,7 @@ impl Bmi for BmiFortran {
         check_initialized(self.initialized, &self.model_name)?;
         let mut count = 0;
         if unsafe { (self.fns.get_input_item_count)(self.handle_ptr(), &mut count) } != 0 {
-            return Err(self.err("get_input_item_count"));
+            return Err(function_failed(&self.model_name,"get_input_item_count"));
         }
         Ok(count)
     }
@@ -375,7 +358,7 @@ impl Bmi for BmiFortran {
         check_initialized(self.initialized, &self.model_name)?;
         let mut count = 0;
         if unsafe { (self.fns.get_output_item_count)(self.handle_ptr(), &mut count) } != 0 {
-            return Err(self.err("get_output_item_count"));
+            return Err(function_failed(&self.model_name,"get_output_item_count"));
         }
         Ok(count)
     }
@@ -389,7 +372,7 @@ impl Bmi for BmiFortran {
             .map(|b| b.as_mut_ptr() as *mut c_char)
             .collect();
         if unsafe { (self.fns.get_input_var_names)(self.handle_ptr(), ptrs.as_mut_ptr()) } != 0 {
-            return Err(self.err("get_input_var_names"));
+            return Err(function_failed(&self.model_name,"get_input_var_names"));
         }
         bufs.iter().map(|b| cstr_to_string(b)).collect()
     }
@@ -403,24 +386,24 @@ impl Bmi for BmiFortran {
             .map(|b| b.as_mut_ptr() as *mut c_char)
             .collect();
         if unsafe { (self.fns.get_output_var_names)(self.handle_ptr(), ptrs.as_mut_ptr()) } != 0 {
-            return Err(self.err("get_output_var_names"));
+            return Err(function_failed(&self.model_name,"get_output_var_names"));
         }
         bufs.iter().map(|b| cstr_to_string(b)).collect()
     }
 
     fn get_var_grid(&self, name: &str) -> BmiResult<i32> {
         check_initialized(self.initialized, &self.model_name)?;
-        let cname = CString::new(name).map_err(|_| BmiError::InvalidUtf8)?;
+        let cname = to_cstring(name)?;
         let mut grid = 0;
         if unsafe { (self.fns.get_var_grid)(self.handle_ptr(), cname.as_ptr(), &mut grid) } != 0 {
-            return Err(self.err("get_var_grid"));
+            return Err(function_failed(&self.model_name,"get_var_grid"));
         }
         Ok(grid)
     }
 
     fn get_var_type(&self, name: &str) -> BmiResult<String> {
         check_initialized(self.initialized, &self.model_name)?;
-        let cname = CString::new(name).map_err(|_| BmiError::InvalidUtf8)?;
+        let cname = to_cstring(name)?;
         let mut buf = vec![0u8; BMI_MAX_NAME];
         if unsafe {
             (self.fns.get_var_type)(
@@ -430,14 +413,14 @@ impl Bmi for BmiFortran {
             )
         } != 0
         {
-            return Err(self.err("get_var_type"));
+            return Err(function_failed(&self.model_name,"get_var_type"));
         }
         cstr_to_string(&buf)
     }
 
     fn get_var_units(&self, name: &str) -> BmiResult<String> {
         check_initialized(self.initialized, &self.model_name)?;
-        let cname = CString::new(name).map_err(|_| BmiError::InvalidUtf8)?;
+        let cname = to_cstring(name)?;
         let mut buf = vec![0u8; BMI_MAX_NAME];
         if unsafe {
             (self.fns.get_var_units)(
@@ -447,36 +430,36 @@ impl Bmi for BmiFortran {
             )
         } != 0
         {
-            return Err(self.err("get_var_units"));
+            return Err(function_failed(&self.model_name,"get_var_units"));
         }
         cstr_to_string(&buf)
     }
 
     fn get_var_itemsize(&self, name: &str) -> BmiResult<i32> {
         check_initialized(self.initialized, &self.model_name)?;
-        let cname = CString::new(name).map_err(|_| BmiError::InvalidUtf8)?;
+        let cname = to_cstring(name)?;
         let mut size = 0;
         if unsafe { (self.fns.get_var_itemsize)(self.handle_ptr(), cname.as_ptr(), &mut size) } != 0
         {
-            return Err(self.err("get_var_itemsize"));
+            return Err(function_failed(&self.model_name,"get_var_itemsize"));
         }
         Ok(size)
     }
 
     fn get_var_nbytes(&self, name: &str) -> BmiResult<i32> {
         check_initialized(self.initialized, &self.model_name)?;
-        let cname = CString::new(name).map_err(|_| BmiError::InvalidUtf8)?;
+        let cname = to_cstring(name)?;
         let mut nbytes = 0;
         if unsafe { (self.fns.get_var_nbytes)(self.handle_ptr(), cname.as_ptr(), &mut nbytes) } != 0
         {
-            return Err(self.err("get_var_nbytes"));
+            return Err(function_failed(&self.model_name,"get_var_nbytes"));
         }
         Ok(nbytes)
     }
 
     fn get_var_location(&self, name: &str) -> BmiResult<String> {
         check_initialized(self.initialized, &self.model_name)?;
-        let cname = CString::new(name).map_err(|_| BmiError::InvalidUtf8)?;
+        let cname = to_cstring(name)?;
         let mut buf = vec![0u8; BMI_MAX_NAME];
         if unsafe {
             (self.fns.get_var_location)(
@@ -486,7 +469,7 @@ impl Bmi for BmiFortran {
             )
         } != 0
         {
-            return Err(self.err("get_var_location"));
+            return Err(function_failed(&self.model_name,"get_var_location"));
         }
         cstr_to_string(&buf)
     }
@@ -495,7 +478,7 @@ impl Bmi for BmiFortran {
         check_initialized(self.initialized, &self.model_name)?;
         let mut time = 0.0;
         if unsafe { (self.fns.get_current_time)(self.handle_ptr(), &mut time) } != 0 {
-            return Err(self.err("get_current_time"));
+            return Err(function_failed(&self.model_name,"get_current_time"));
         }
         Ok(time)
     }
@@ -504,7 +487,7 @@ impl Bmi for BmiFortran {
         check_initialized(self.initialized, &self.model_name)?;
         let mut time = 0.0;
         if unsafe { (self.fns.get_start_time)(self.handle_ptr(), &mut time) } != 0 {
-            return Err(self.err("get_start_time"));
+            return Err(function_failed(&self.model_name,"get_start_time"));
         }
         Ok(time)
     }
@@ -513,7 +496,7 @@ impl Bmi for BmiFortran {
         check_initialized(self.initialized, &self.model_name)?;
         let mut time = 0.0;
         if unsafe { (self.fns.get_end_time)(self.handle_ptr(), &mut time) } != 0 {
-            return Err(self.err("get_end_time"));
+            return Err(function_failed(&self.model_name,"get_end_time"));
         }
         Ok(time)
     }
@@ -524,7 +507,7 @@ impl Bmi for BmiFortran {
         if unsafe { (self.fns.get_time_units)(self.handle_ptr(), buf.as_mut_ptr() as *mut c_char) }
             != 0
         {
-            return Err(self.err("get_time_units"));
+            return Err(function_failed(&self.model_name,"get_time_units"));
         }
         cstr_to_string(&buf)
     }
@@ -533,21 +516,22 @@ impl Bmi for BmiFortran {
         check_initialized(self.initialized, &self.model_name)?;
         let mut ts = 0.0;
         if unsafe { (self.fns.get_time_step)(self.handle_ptr(), &mut ts) } != 0 {
-            return Err(self.err("get_time_step"));
+            return Err(function_failed(&self.model_name,"get_time_step"));
         }
         Ok(ts)
     }
 
+    // TODO: get_value_f64/f32/i32 and set_value_f64/f32/i32 could use a generic helper to reduce duplication. Deferred because the unsafe FFI calls need careful attention.
     fn get_value_f64(&self, name: &str) -> BmiResult<Vec<f64>> {
         check_initialized(self.initialized, &self.model_name)?;
         let count = self.get_var_nbytes(name)? as usize / 8;
         let mut vals = vec![0.0f64; count];
-        let cname = CString::new(name).map_err(|_| BmiError::InvalidUtf8)?;
+        let cname = to_cstring(name)?;
         if unsafe {
             (self.fns.get_value_double)(self.handle_ptr(), cname.as_ptr(), vals.as_mut_ptr())
         } != 0
         {
-            return Err(self.err("get_value_double"));
+            return Err(function_failed(&self.model_name,"get_value_double"));
         }
         Ok(vals)
     }
@@ -556,12 +540,12 @@ impl Bmi for BmiFortran {
         check_initialized(self.initialized, &self.model_name)?;
         let count = self.get_var_nbytes(name)? as usize / 4;
         let mut vals = vec![0.0f32; count];
-        let cname = CString::new(name).map_err(|_| BmiError::InvalidUtf8)?;
+        let cname = to_cstring(name)?;
         if unsafe {
             (self.fns.get_value_float)(self.handle_ptr(), cname.as_ptr(), vals.as_mut_ptr())
         } != 0
         {
-            return Err(self.err("get_value_float"));
+            return Err(function_failed(&self.model_name,"get_value_float"));
         }
         Ok(vals)
     }
@@ -570,18 +554,18 @@ impl Bmi for BmiFortran {
         check_initialized(self.initialized, &self.model_name)?;
         let count = self.get_var_nbytes(name)? as usize / 4;
         let mut vals = vec![0i32; count];
-        let cname = CString::new(name).map_err(|_| BmiError::InvalidUtf8)?;
+        let cname = to_cstring(name)?;
         if unsafe { (self.fns.get_value_int)(self.handle_ptr(), cname.as_ptr(), vals.as_mut_ptr()) }
             != 0
         {
-            return Err(self.err("get_value_int"));
+            return Err(function_failed(&self.model_name,"get_value_int"));
         }
         Ok(vals)
     }
 
     fn set_value_f64(&mut self, name: &str, values: &[f64]) -> BmiResult<()> {
         check_initialized(self.initialized, &self.model_name)?;
-        let cname = CString::new(name).map_err(|_| BmiError::InvalidUtf8)?;
+        let cname = to_cstring(name)?;
         if unsafe {
             (self.fns.set_value_double)(
                 self.handle_ptr_mut(),
@@ -590,14 +574,14 @@ impl Bmi for BmiFortran {
             )
         } != 0
         {
-            return Err(self.err("set_value_double"));
+            return Err(function_failed(&self.model_name,"set_value_double"));
         }
         Ok(())
     }
 
     fn set_value_f32(&mut self, name: &str, values: &[f32]) -> BmiResult<()> {
         check_initialized(self.initialized, &self.model_name)?;
-        let cname = CString::new(name).map_err(|_| BmiError::InvalidUtf8)?;
+        let cname = to_cstring(name)?;
         if unsafe {
             (self.fns.set_value_float)(
                 self.handle_ptr_mut(),
@@ -606,14 +590,14 @@ impl Bmi for BmiFortran {
             )
         } != 0
         {
-            return Err(self.err("set_value_float"));
+            return Err(function_failed(&self.model_name,"set_value_float"));
         }
         Ok(())
     }
 
     fn set_value_i32(&mut self, name: &str, values: &[i32]) -> BmiResult<()> {
         check_initialized(self.initialized, &self.model_name)?;
-        let cname = CString::new(name).map_err(|_| BmiError::InvalidUtf8)?;
+        let cname = to_cstring(name)?;
         if unsafe {
             (self.fns.set_value_int)(
                 self.handle_ptr_mut(),
@@ -622,7 +606,7 @@ impl Bmi for BmiFortran {
             )
         } != 0
         {
-            return Err(self.err("set_value_int"));
+            return Err(function_failed(&self.model_name,"set_value_int"));
         }
         Ok(())
     }
@@ -632,7 +616,7 @@ impl Bmi for BmiFortran {
         let mut g = grid;
         let mut rank = 0;
         if unsafe { (self.fns.get_grid_rank)(self.handle_ptr(), &mut g, &mut rank) } != 0 {
-            return Err(self.err("get_grid_rank"));
+            return Err(function_failed(&self.model_name,"get_grid_rank"));
         }
         Ok(rank)
     }
@@ -642,7 +626,7 @@ impl Bmi for BmiFortran {
         let mut g = grid;
         let mut size = 0;
         if unsafe { (self.fns.get_grid_size)(self.handle_ptr(), &mut g, &mut size) } != 0 {
-            return Err(self.err("get_grid_size"));
+            return Err(function_failed(&self.model_name,"get_grid_size"));
         }
         Ok(size)
     }
@@ -655,16 +639,10 @@ impl Bmi for BmiFortran {
             (self.fns.get_grid_type)(self.handle_ptr(), &mut g, buf.as_mut_ptr() as *mut c_char)
         } != 0
         {
-            return Err(self.err("get_grid_type"));
+            return Err(function_failed(&self.model_name,"get_grid_type"));
         }
         cstr_to_string(&buf)
     }
 }
 
-impl Drop for BmiFortran {
-    fn drop(&mut self) {
-        if self.initialized {
-            let _ = self.finalize();
-        }
-    }
-}
+impl_bmi_drop!(BmiFortran);

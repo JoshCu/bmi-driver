@@ -28,6 +28,9 @@ toml = "0.8"
 dirs = "5"
 zarrs = { version = "0.23", features = ["filesystem"], optional = true }
 
+[dev-dependencies]
+tempfile = "3"
+
 [[bin]]
 name = "bmi-driver"
 path = "src/main.rs"
