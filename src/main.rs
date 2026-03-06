@@ -149,7 +149,7 @@ fn print_units(realization: &PathBuf, locations: &[String]) -> Result<(), BmiErr
     let mut runner = ModelRunner::from_config(realization)?;
     if let Some(loc) = locations.first() {
         runner.initialize(loc)?;
-        runner.print_all_unit_info();
+        runner.print_unit_conversions(false);
         runner.finalize()?;
     } else {
         eprintln!("No locations found.");
@@ -227,15 +227,15 @@ fn run_parent(
                     // Re-initialize with updated config to show new conversions
                     let mut runner2 = ModelRunner::from_config(realization)?;
                     runner2.initialize(loc)?;
-                    runner2.print_active_conversions();
+                    runner2.print_unit_conversions(true);
                     runner2.finalize()?;
                 } else {
                     eprintln!("Skipping. Running with current config.");
-                    runner.print_active_conversions();
+                    runner.print_unit_conversions(true);
                     runner.finalize()?;
                 }
             } else {
-                runner.print_active_conversions();
+                runner.print_unit_conversions(true);
                 runner.finalize()?;
             }
         }

@@ -10,7 +10,9 @@ use crate::aliases;
 use crate::config::{
     parse_datetime, BmiAdapterType, DownsampleMode, ModuleConfig, RealizationConfig, UpsampleMode,
 };
-use crate::error::{BmiError, BmiResult};
+use crate::error::{function_failed, BmiResult};
+
+const TIMESTEP_EPSILON: f64 = 1e-9;
 use crate::forcings::{Forcings, NetCdfForcings};
 use crate::resample;
 use crate::traits::{Bmi, BmiExt};
@@ -167,10 +169,7 @@ impl ModelRunner {
                     .filter(|d| !self.vars.contains_key(*d))
                     .cloned()
                     .collect();
-                return Err(BmiError::FunctionFailed {
-                    model: "runner".into(),
-                    func: format!("Missing dependencies: {:?}", missing),
-                });
+                return Err(function_failed("runner", format!("Missing dependencies: {:?}", missing)));
             }
         }
         Ok(())
@@ -186,10 +185,7 @@ impl ModelRunner {
             Box::new(sloth)
         } else {
             let adapter = BmiAdapterType::from_name(&module.name).ok_or_else(|| {
-                BmiError::FunctionFailed {
-                    model: module.params.model_type_name.clone(),
-                    func: format!("Unknown adapter: {}", module.name),
-                }
+                function_failed(&module.params.model_type_name, format!("Unknown adapter: {}", module.name))
             })?;
 
             match adapter {
@@ -238,12 +234,11 @@ impl ModelRunner {
                             &module.params.registration_function,
                         )?)
                     } else {
-                        return Err(BmiError::FunctionFailed {
-                            model: module.params.model_type_name.clone(),
-                            func: "bmi_python requires either 'python_type' (e.g. \"lstm.bmi_lstm.bmi_LSTM\") \
-                                   or both 'library_file' and 'registration_function'"
-                                .into(),
-                        });
+                        return Err(function_failed(
+                            &module.params.model_type_name,
+                            "bmi_python requires either 'python_type' (e.g. \"lstm.bmi_lstm.bmi_LSTM\") \
+                             or both 'library_file' and 'registration_function'",
+                        ));
                     }
                 }
             }
@@ -327,10 +322,7 @@ impl ModelRunner {
 
     pub fn run(&mut self) -> BmiResult<()> {
         if self.has_run {
-            return Err(BmiError::FunctionFailed {
-                model: "runner".into(),
-                func: "already run".into(),
-            });
+            return Err(function_failed("runner", "already run"));
         }
 
         for i in 0..self.models.len() {
@@ -364,7 +356,7 @@ impl ModelRunner {
                 }
             };
 
-            if (source_ts.dt_seconds - output_dt).abs() < 1e-9 {
+            if (source_ts.dt_seconds - output_dt).abs() < TIMESTEP_EPSILON {
                 // Same timestep, no resampling needed
                 resampled.insert(name.clone(), vals.clone());
                 continue;
@@ -447,19 +439,16 @@ impl ModelRunner {
         downsample_mode: DownsampleMode,
         upsample_mode: UpsampleMode,
     ) -> BmiResult<f64> {
-        let source_ts =
-            self.source_timesteps
-                .get(name)
-                .ok_or_else(|| BmiError::FunctionFailed {
-                    model: "runner".into(),
-                    func: format!("No timestep info for variable: {}", name),
-                })?;
+        let source_ts = self
+            .source_timesteps
+            .get(name)
+            .ok_or_else(|| function_failed("runner", format!("No timestep info for variable: {}", name)))?;
         let source_dt = source_ts.dt_seconds;
 
         match self.vars.get(name) {
             Some(VarSource::Forcing) => {
                 // Fast path: same timestep
-                if (source_dt - dest_dt).abs() < 1e-9 {
+                if (source_dt - dest_dt).abs() < TIMESTEP_EPSILON {
                     let step = (dest_time / source_dt).round() as usize;
                     return self.forcings.get_f64(name, &self.location_id, step);
                 }
@@ -473,21 +462,15 @@ impl ModelRunner {
                 )
             }
             Some(VarSource::Model(_)) => {
-                let source_data =
-                    self.outputs
-                        .get(name)
-                        .ok_or_else(|| BmiError::FunctionFailed {
-                            model: "runner".into(),
-                            func: format!("'{}' not yet computed", name),
-                        })?;
+                let source_data = self
+                    .outputs
+                    .get(name)
+                    .ok_or_else(|| function_failed("runner", format!("'{}' not yet computed", name)))?;
                 // Fast path: same timestep
-                if (source_dt - dest_dt).abs() < 1e-9 {
+                if (source_dt - dest_dt).abs() < TIMESTEP_EPSILON {
                     let step = (dest_time / source_dt).round() as usize;
                     return source_data.get(step).copied().ok_or_else(|| {
-                        BmiError::FunctionFailed {
-                            model: "runner".into(),
-                            func: format!("'{}' not available at step {}", name, step),
-                        }
+                        function_failed("runner", format!("'{}' not available at step {}", name, step))
                     });
                 }
                 resample::resample_value(
@@ -499,10 +482,7 @@ impl ModelRunner {
                     upsample_mode,
                 )
             }
-            None => Err(BmiError::FunctionFailed {
-                model: "runner".into(),
-                func: format!("Unknown variable: {}", name),
-            }),
+            None => Err(function_failed("runner", format!("Unknown variable: {}", name))),
         }
     }
 
@@ -526,7 +506,7 @@ impl ModelRunner {
                 DownsampleMode::Interpolate => {
                     let lower_val = self.forcings.get_f64(name, &self.location_id, lower_idx)?;
                     let frac = fractional_idx - lower_idx as f64;
-                    if frac.abs() < 1e-12 {
+                    if frac.abs() < TIMESTEP_EPSILON {
                         return Ok(lower_val);
                     }
                     match self
@@ -550,10 +530,7 @@ impl ModelRunner {
                 }
             }
             if vals.is_empty() {
-                return Err(BmiError::FunctionFailed {
-                    model: "runner".into(),
-                    func: format!("No forcing data for '{}' in window", name),
-                });
+                return Err(function_failed("runner", format!("No forcing data for '{}' in window", name)));
             }
             resample::aggregate(&vals, upsample_mode)
         }
@@ -574,52 +551,40 @@ impl ModelRunner {
         }
     }
 
-    /// Print only the active (non-identity) unit conversions to stderr.
-    pub fn print_active_conversions(&self) {
-        let mut any = false;
-        for m in &self.models {
-            for (model_input, source_var) in &m.input_map {
-                if let Some(conv) = m.input_conversions.get(model_input) {
-                    if conv.is_identity() {
-                        continue;
-                    }
-                    let source_label = self.source_label(source_var);
-                    eprintln!(
-                        "  {}: {} ← {} ({}): {}",
-                        m.name, model_input, source_var, source_label, conv
-                    );
-                    any = true;
-                }
-            }
+    /// Print unit conversions to stderr.
+    /// If `active_only` is true, only prints non-identity conversions.
+    /// If false, prints all variable mappings including those without unit info.
+    pub fn print_unit_conversions(&self, active_only: bool) {
+        if !active_only {
+            eprintln!("Unit conversions for this run:");
         }
-        if any {
-            eprintln!();
-        }
-    }
-
-    /// Print a full summary of all variable mappings and unit conversions.
-    pub fn print_all_unit_info(&self) {
-        eprintln!("Unit conversions for this run:");
         let mut any = false;
         for m in &self.models {
             for (model_input, source_var) in &m.input_map {
                 let source_label = self.source_label(source_var);
-
                 if let Some(conv) = m.input_conversions.get(model_input) {
+                    if active_only && conv.is_identity() {
+                        continue;
+                    }
                     eprintln!(
                         "  {}: {} ← {} ({}): {}",
                         m.name, model_input, source_var, source_label, conv
                     );
-                } else {
+                } else if !active_only {
                     eprintln!(
                         "  {}: {} ← {} ({}): no unit info available",
                         m.name, model_input, source_var, source_label
                     );
+                } else {
+                    continue;
                 }
                 any = true;
             }
         }
-        if !any {
+        if active_only && any {
+            eprintln!();
+        }
+        if !active_only && !any {
             eprintln!("  (no variable mappings)");
         }
     }
@@ -687,27 +652,18 @@ impl ModelRunner {
 
     pub fn main_outputs(&self) -> BmiResult<&Vec<f64>> {
         if !self.has_run {
-            return Err(BmiError::FunctionFailed {
-                model: "runner".into(),
-                func: "call run() first".into(),
-            });
+            return Err(function_failed("runner", "call run() first"));
         }
         Ok(&self.final_outputs)
     }
 
     pub fn outputs(&self, name: &str) -> BmiResult<&Vec<f64>> {
         if !self.has_run {
-            return Err(BmiError::FunctionFailed {
-                model: "runner".into(),
-                func: "call run() first".into(),
-            });
+            return Err(function_failed("runner", "call run() first"));
         }
         self.outputs
             .get(name)
-            .ok_or_else(|| BmiError::FunctionFailed {
-                model: "runner".into(),
-                func: format!("Output '{}' not found", name),
-            })
+            .ok_or_else(|| function_failed("runner", format!("Output '{}' not found", name)))
     }
 
     pub fn finalize(&mut self) -> BmiResult<()> {
