@@ -4,3 +4,4 @@ docs
 .github
 .claude
 test_data
+Dockerfile

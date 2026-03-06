@@ -9,5 +9,6 @@ FROM awiciroh/ngiab AS final
 COPY --from=ngiab_build /build/target/release/bmi-driver /usr/local/bin/bmi-driver
 VOLUME /data
 RUN ln -s /ngen/ngen/data /data
+ENV OMP_NUM_THREADS=1
 ENTRYPOINT [ "/usr/local/bin/bmi-driver" ]
 CMD ["/data"]
