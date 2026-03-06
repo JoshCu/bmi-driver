@@ -6,13 +6,10 @@ use zarrs::filesystem::FilesystemStore;
 use zarrs::group::GroupBuilder;
 use zarrs::storage::ReadableWritableListableStorage;
 
-use crate::error::{BmiError, BmiResult};
+use crate::error::{function_failed, BmiError, BmiResult};
 
 fn err(msg: String) -> BmiError {
-    BmiError::FunctionFailed {
-        model: "zarr_writer".into(),
-        func: msg,
-    }
+    function_failed("zarr_writer", msg)
 }
 
 /// Create a Zarr V3 store with pre-allocated arrays for all output variables.

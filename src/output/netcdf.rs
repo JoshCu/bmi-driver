@@ -5,13 +5,10 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use crate::error::{BmiError, BmiResult};
+use crate::error::{function_failed, BmiError, BmiResult};
 
 fn err(msg: String) -> BmiError {
-    BmiError::FunctionFailed {
-        model: "netcdf_writer".into(),
-        func: msg,
-    }
+    function_failed("netcdf_writer", msg)
 }
 
 /// Suppress HDF5's default error handler which prints verbose diagnostics

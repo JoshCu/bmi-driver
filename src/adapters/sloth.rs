@@ -1,5 +1,5 @@
 use super::check_initialized;
-use crate::error::{BmiError, BmiResult};
+use crate::error::{function_failed, BmiResult};
 use crate::traits::{Bmi, VarType};
 use std::collections::HashMap;
 
@@ -66,10 +66,7 @@ impl BmiSloth {
         let parts: Vec<&str> = key[paren_start + 1..paren_end].split(',').collect();
 
         if parts.len() != 4 {
-            return Err(BmiError::FunctionFailed {
-                model: "SLOTH".into(),
-                func: format!("Invalid param format: {}", key),
-            });
+            return Err(function_failed("SLOTH", format!("Invalid param format: {}", key)));
         }
 
         let count: usize = parts[0].trim().parse().unwrap_or(1);
@@ -84,10 +81,10 @@ impl BmiSloth {
             _ => VarType::Double,
         };
 
-        let value: f64 = val.trim().parse().map_err(|_| BmiError::FunctionFailed {
-            model: "SLOTH".into(),
-            func: format!("Invalid value '{}' for {}", val, name),
-        })?;
+        let value: f64 = val
+            .trim()
+            .parse()
+            .map_err(|_| function_failed("SLOTH", format!("Invalid value '{}' for {}", val, name)))?;
 
         Ok(Some((
             name,
@@ -105,10 +102,7 @@ impl BmiSloth {
     fn get_var(&self, name: &str) -> BmiResult<&SlothVar> {
         self.variables
             .get(name)
-            .ok_or_else(|| BmiError::FunctionFailed {
-                model: self.name.clone(),
-                func: format!("Unknown variable: {}", name),
-            })
+            .ok_or_else(|| function_failed(&self.name, format!("Unknown variable: {}", name)))
     }
 }
 
