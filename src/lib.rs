@@ -27,6 +27,7 @@ pub use config::{
     parse_datetime, BmiAdapterType, DownsampleMode, ModuleConfig, OutputFormat, RealizationConfig,
     UpsampleMode,
 };
+pub use output::DivideDataStore;
 pub use error::{BmiError, BmiResult};
 pub use forcings::{Forcings, NetCdfForcings};
 pub use library::preload_dependencies;

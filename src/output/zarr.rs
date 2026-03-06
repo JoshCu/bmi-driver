@@ -126,3 +126,26 @@ pub fn write_location(
 
     Ok(())
 }
+
+/// Stateful wrapper around `write_location` that tracks the current location index.
+pub struct ZarrStore {
+    path: std::path::PathBuf,
+    next_idx: usize,
+}
+
+impl ZarrStore {
+    pub fn new(path: std::path::PathBuf, start_idx: usize) -> Self {
+        Self {
+            path,
+            next_idx: start_idx,
+        }
+    }
+}
+
+impl super::DivideDataStore for ZarrStore {
+    fn write_location(&mut self, _loc_id: &str, columns: &[(String, Vec<f64>)]) -> BmiResult<()> {
+        write_location(&self.path, self.next_idx, columns)?;
+        self.next_idx += 1;
+        Ok(())
+    }
+}

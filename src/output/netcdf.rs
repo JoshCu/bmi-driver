@@ -94,7 +94,11 @@ impl NetCdfWriter {
             })
     }
 
-    pub fn finish(mut self) -> BmiResult<()> {
+    pub fn finish_owned(mut self) -> BmiResult<()> {
+        self.shutdown()
+    }
+
+    fn shutdown(&mut self) -> BmiResult<()> {
         let _ = self.sender.send(WriterMessage::Shutdown);
         if let Some(handle) = self.handle.take() {
             handle
@@ -103,6 +107,19 @@ impl NetCdfWriter {
         } else {
             Ok(())
         }
+    }
+}
+
+impl super::DivideDataStore for NetCdfWriter {
+    fn write_location(&mut self, loc_id: &str, columns: &[(String, Vec<f64>)]) -> BmiResult<()> {
+        self.write(LocationResult {
+            location_id: loc_id.to_string(),
+            columns: columns.to_vec(),
+        })
+    }
+
+    fn finish(&mut self) -> BmiResult<()> {
+        self.shutdown()
     }
 }
 
