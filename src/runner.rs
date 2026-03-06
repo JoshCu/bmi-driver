@@ -176,6 +176,36 @@ impl ModelRunner {
     }
 
     fn load_model(&mut self, module: &ModuleConfig, loc_id: &str, idx: usize) -> BmiResult<()> {
+        let model = self.create_adapter(module, loc_id)?;
+        let timestep_info = self.query_model_timestep(&*model, module);
+
+        for output in model.get_output_var_names()? {
+            self.source_timesteps
+                .insert(output.clone(), timestep_info.clone());
+            self.vars.insert(output.clone(), VarSource::Model(idx));
+        }
+
+        let input_conversions = self.build_unit_conversions(&*model, module);
+
+        self.models.push(ModelInstance {
+            name: module.params.model_type_name.clone(),
+            model,
+            input_map: module.params.variables_names_map.clone(),
+            main_output: module.params.main_output_variable.clone(),
+            input_conversions,
+            timestep_info,
+            downsample_mode: module.params.downsample_mode,
+            upsample_mode: module.params.upsample_mode,
+        });
+        Ok(())
+    }
+
+    /// Create and initialize the appropriate BMI adapter for a module config.
+    fn create_adapter(
+        &self,
+        module: &ModuleConfig,
+        loc_id: &str,
+    ) -> BmiResult<Box<dyn Bmi>> {
         let is_sloth =
             module.name == "bmi_c++" && module.params.model_type_name.to_uppercase() == "SLOTH";
 
@@ -253,11 +283,14 @@ impl ModelRunner {
             }
         }
 
-        // Query model timestep
+        Ok(model)
+    }
+
+    /// Query a model's timestep and return TimestepInfo.
+    fn query_model_timestep(&self, model: &dyn Bmi, module: &ModuleConfig) -> TimestepInfo {
         let model_dt_seconds = match (model.get_time_step(), model.get_time_units()) {
             (Ok(dt), Ok(units)) => {
-                let factor = crate::traits::parse_time_units(&units);
-                let dt_sec = dt * factor;
+                let dt_sec = dt * crate::traits::parse_time_units(&units);
                 if dt_sec > 0.0 {
                     dt_sec
                 } else {
@@ -274,20 +307,19 @@ impl ModelRunner {
                 self.config.time.output_interval as f64
             }
         };
-        let model_steps = (self.simulation_span_seconds / model_dt_seconds) as usize;
-        let timestep_info = TimestepInfo {
+        TimestepInfo {
             dt_seconds: model_dt_seconds,
-            num_steps: model_steps,
-        };
-
-        for output in model.get_output_var_names()? {
-            self.source_timesteps
-                .insert(output.clone(), timestep_info.clone());
-            self.vars.insert(output.clone(), VarSource::Model(idx));
+            num_steps: (self.simulation_span_seconds / model_dt_seconds) as usize,
         }
+    }
 
-        // Build unit conversions for each input mapping
-        let mut input_conversions = HashMap::new();
+    /// Build unit conversions for each input variable mapping.
+    fn build_unit_conversions(
+        &self,
+        model: &dyn Bmi,
+        module: &ModuleConfig,
+    ) -> HashMap<String, UnitConversion> {
+        let mut conversions = HashMap::new();
         for (model_input, source_var) in &module.params.variables_names_map {
             let dest_units = model.get_var_units(model_input).unwrap_or_default();
             let source_units = self.get_source_units(source_var);
@@ -303,21 +335,10 @@ impl ModelRunner {
                         );
                     }
                 }
-                input_conversions.insert(model_input.clone(), conv);
+                conversions.insert(model_input.clone(), conv);
             }
         }
-
-        self.models.push(ModelInstance {
-            name: module.params.model_type_name.clone(),
-            model,
-            input_map: module.params.variables_names_map.clone(),
-            main_output: module.params.main_output_variable.clone(),
-            input_conversions,
-            timestep_info,
-            downsample_mode: module.params.downsample_mode,
-            upsample_mode: module.params.upsample_mode,
-        });
-        Ok(())
+        conversions
     }
 
     pub fn run(&mut self) -> BmiResult<()> {
