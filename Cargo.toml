@@ -13,6 +13,7 @@ default = ["fortran", "python", "zarr"]
 fortran = []
 python = ["dep:pyo3"]
 zarr = ["dep:zarrs"]
+static = ["netcdf/static"]
 
 [dependencies]
 pyo3 = { version = "0.22", features = ["auto-initialize"], optional = true }
