@@ -138,8 +138,7 @@ fn main() -> Result<(), BmiError> {
         .unwrap_or(ProgressMode::Summary);
 
     if let (Some(start), Some(end)) = (args.worker_start, args.worker_end) {
-        let output_path = data_dir.join("outputs").join("bmi-driver");
-        run_worker(&realization, &locations[start..end], &output_path, start)
+        run_worker(&realization, &locations[start..end], &data_dir, start)
     } else {
         run_parent(&data_dir, &realization, &locations, jobs, progress)
     }
@@ -166,11 +165,14 @@ fn run_parent(
 ) -> Result<(), BmiError> {
     // Check for missing mappings and print active unit conversions
     let output_format;
+    let output_path;
     #[cfg(feature = "zarr")]
     let mut discovered_vars: Vec<String> = Vec::new();
     {
         let mut runner = ModelRunner::from_config(realization)?;
         output_format = runner.config.output_format;
+        output_path = data_dir.join(&runner.config.output_root);
+
         if let Some(loc) = locations.first() {
             runner.initialize(loc)?;
 
@@ -251,7 +253,6 @@ fn run_parent(
 
     let exe = env::current_exe().unwrap();
 
-    let output_path = data_dir.join("outputs").join("bmi-driver");
     fs::create_dir_all(&output_path).unwrap();
 
     // For zarr: create the store before spawning workers so they can write directly
@@ -512,7 +513,7 @@ fn apply_suggestions(
 fn run_worker(
     realization: &PathBuf,
     locations: &[String],
-    output_path: &PathBuf,
+    data_dir: &PathBuf,
     #[cfg_attr(not(feature = "zarr"), allow(unused))] global_start: usize,
 ) -> Result<(), BmiError> {
     let mut runner = ModelRunner::from_config(realization)?;
@@ -520,6 +521,7 @@ fn run_worker(
     let start_epoch = bmi_driver::parse_datetime(&runner.config.time.start_time)?;
     let interval = runner.config.time.output_interval;
     let output_format = runner.config.output_format;
+    let output_path = data_dir.join(&runner.config.output_root);
     let output_vars: Vec<String> = runner
         .config
         .global
@@ -530,7 +532,7 @@ fn run_worker(
 
     let mut store = create_output_store(
         output_format,
-        output_path,
+        &output_path,
         &runner,
         start_epoch,
         interval,

@@ -61,11 +61,18 @@ fn is_default_output_format(f: &OutputFormat) -> bool {
     *f == OutputFormat::Csv
 }
 
+fn output_root_default() -> String {
+    "outputs/bmi-driver".to_string()
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RealizationConfig {
     pub global: GlobalConfig,
     pub time: TimeConfig,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[serde(
+        default = "output_root_default",
+        skip_serializing_if = "String::is_empty"
+    )]
     pub output_root: String,
     #[serde(default, skip_serializing_if = "is_default_output_format")]
     pub output_format: OutputFormat,
