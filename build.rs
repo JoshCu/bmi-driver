@@ -1,6 +1,7 @@
 use std::process::Command;
 
 fn main() {
+    #[cfg(not(feature = "static"))]
     check_netcdf();
 
     #[cfg(feature = "python")]
@@ -49,7 +50,10 @@ fn check_python() {
     let python = std::env::var("PYO3_PYTHON").unwrap_or_else(|_| "python3".to_string());
 
     let has_headers = Command::new(&python)
-        .args(["-c", "import sysconfig; print(sysconfig.get_path('include'))"])
+        .args([
+            "-c",
+            "import sysconfig; print(sysconfig.get_path('include'))",
+        ])
         .output()
         .map(|o| {
             if !o.status.success() {
