@@ -1,9 +1,10 @@
 use bmi_driver::{preload_dependencies, BmiError, DivideDataStore, ModelRunner, OutputFormat};
 use clap::Parser;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use ipc_channel::ipc::{IpcOneShotServer, IpcSender};
 use std::env;
 use std::fs;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::thread;
@@ -23,6 +24,17 @@ enum ProgressMode {
 struct TomlConfig {
     jobs: Option<usize>,
     progress: Option<ProgressMode>,
+}
+
+/// Messages sent from worker processes to the parent over IPC.
+#[derive(serde::Serialize, serde::Deserialize, Debug)]
+enum WorkerMessage {
+    /// Worker completed `count` locations so far (cumulative).
+    Progress(u64),
+    /// Worker finished successfully.
+    Done,
+    /// Worker encountered an error.
+    Error(String),
 }
 
 fn load_toml_config() -> TomlConfig {
@@ -46,6 +58,10 @@ fn load_toml_config() -> TomlConfig {
 struct Args {
     data_dir: PathBuf,
 
+    /// Path to the realization.json file
+    #[arg(long)]
+    config: Option<PathBuf>,
+
     /// Number of parallel worker processes (default: number of CPUs)
     #[arg(short = 'j', long)]
     jobs: Option<usize>,
@@ -61,6 +77,10 @@ struct Args {
     /// Internal: end index for worker mode (exclusive)
     #[arg(long, hide = true)]
     worker_end: Option<usize>,
+
+    /// Internal: IPC server name for worker→parent communication
+    #[arg(long, hide = true)]
+    ipc_server: Option<String>,
 
     /// Print all unit conversion info and exit without running
     #[arg(long)]
@@ -89,7 +109,9 @@ fn main() -> Result<(), BmiError> {
     let config_dir = data_dir.join("config");
     let _ = env::set_current_dir(&data_dir);
 
-    let realization = config_dir.join("realization.json");
+    let realization = args
+        .config
+        .unwrap_or_else(|| config_dir.join("realization.json"));
 
     if args.minify {
         bmi_driver::config::minify_file(&realization)?;
@@ -115,8 +137,6 @@ fn main() -> Result<(), BmiError> {
     let locations: Vec<String> = rows.flatten().collect();
 
     // Apply node-level partitioning for multi-node / SLURM job-array use.
-    // --node-start and --node-count carve out this node's slice of the location list
-    // before the internal worker processes further sub-divide it with -j.
     let node_start = args.node_start.min(locations.len());
     let node_end = if args.node_count > 0 {
         (node_start + args.node_count).min(locations.len())
@@ -137,8 +157,10 @@ fn main() -> Result<(), BmiError> {
         .or(toml_cfg.progress)
         .unwrap_or(ProgressMode::Summary);
 
-    if let (Some(start), Some(end)) = (args.worker_start, args.worker_end) {
-        run_worker(&realization, &locations[start..end], &data_dir, start)
+    if let (Some(start), Some(end), Some(ipc_server)) =
+        (args.worker_start, args.worker_end, args.ipc_server)
+    {
+        run_worker(&realization, &locations[start..end], &data_dir, start, &ipc_server)
     } else {
         run_parent(&data_dir, &realization, &locations, jobs, progress)
     }
@@ -319,20 +341,31 @@ fn run_parent(
         let end = ((i + 1) * chunk_size).min(n_locations);
         let worker_count = (end - start) as u64;
 
+        // Create an IPC one-shot server for this worker
+        let (server, server_name) =
+            IpcOneShotServer::<WorkerMessage>::new().map_err(|e| BmiError::FunctionFailed {
+                model: "runner".into(),
+                func: format!("Failed to create IPC server: {}", e),
+            })?;
+
         let mut cmd = Command::new(&exe);
         cmd.arg(data_dir)
+            .arg("--config")
+            .arg(&realization)
             .arg("--worker-start")
             .arg(start.to_string())
             .arg("--worker-end")
-            .arg(end.to_string());
+            .arg(end.to_string())
+            .arg("--ipc-server")
+            .arg(&server_name);
 
         #[cfg(feature = "zarr")]
         if output_format == OutputFormat::Zarr && !output_vars_csv.is_empty() {
             cmd.arg("--output-vars").arg(&output_vars_csv);
         }
 
-        let mut child = cmd
-            .stdout(Stdio::piped())
+        let child = cmd
+            .stdout(Stdio::null())
             .stderr(Stdio::inherit())
             .spawn()
             .map_err(|e| BmiError::FunctionFailed {
@@ -347,28 +380,40 @@ fn run_parent(
             pb
         });
 
-        let stdout = child.stdout.take().unwrap();
         let overall_pb = overall_pb.clone();
 
         let handle = thread::spawn(move || {
-            let reader = BufReader::new(stdout);
-            let mut prev = 0u64;
-            for line in reader.lines().flatten() {
-                if let Ok(count) = line.trim().parse::<u64>() {
-                    let delta = count - prev;
-                    if let Some(pb) = &worker_pb {
-                        pb.inc(delta);
+            // Accept the worker's connection — blocks until the worker connects and sends
+            // its first message.
+            let (rx, first_msg) = match server.accept() {
+                Ok(pair) => pair,
+                Err(e) => {
+                    eprintln!("IPC accept failed for worker: {}", e);
+                    return child;
+                }
+            };
+
+            // Process the first message
+            handle_worker_message(&first_msg, &worker_pb, &overall_pb);
+
+            // Read remaining messages until the channel closes or worker signals Done/Error
+            loop {
+                match rx.recv() {
+                    Ok(msg) => {
+                        let done = matches!(msg, WorkerMessage::Done | WorkerMessage::Error(_));
+                        handle_worker_message(&msg, &worker_pb, &overall_pb);
+                        if done {
+                            break;
+                        }
                     }
-                    if let Some(pb) = &overall_pb {
-                        pb.inc(delta);
-                    }
-                    prev = count;
+                    Err(_) => break, // Channel closed
                 }
             }
+
             if let Some(pb) = worker_pb {
                 pb.finish_and_clear();
             }
-            child.wait()
+            child
         });
         handles.push(handle);
     }
@@ -376,15 +421,17 @@ fn run_parent(
     let mut failed = false;
     for handle in handles {
         match handle.join() {
-            Ok(Ok(status)) if status.success() => {}
-            Ok(Ok(status)) => {
-                eprintln!("Worker exited with: {}", status);
-                failed = true;
-            }
-            Ok(Err(e)) => {
-                eprintln!("Worker error: {}", e);
-                failed = true;
-            }
+            Ok(mut child) => match child.wait() {
+                Ok(status) if status.success() => {}
+                Ok(status) => {
+                    eprintln!("Worker exited with: {}", status);
+                    failed = true;
+                }
+                Err(e) => {
+                    eprintln!("Worker error: {}", e);
+                    failed = true;
+                }
+            },
             Err(_) => {
                 eprintln!("Worker thread panicked");
                 failed = true;
@@ -428,6 +475,32 @@ fn run_parent(
     Ok(())
 }
 
+/// Process a single WorkerMessage, updating progress bars as needed.
+fn handle_worker_message(
+    msg: &WorkerMessage,
+    worker_pb: &Option<ProgressBar>,
+    overall_pb: &Option<ProgressBar>,
+) {
+    match msg {
+        WorkerMessage::Progress(count) => {
+            // Progress messages carry the cumulative count; we need the delta.
+            // Since we process messages sequentially per worker, track via pb position.
+            let current = worker_pb.as_ref().map_or(0, |pb| pb.position());
+            let delta = count.saturating_sub(current);
+            if let Some(pb) = worker_pb {
+                pb.inc(delta);
+            }
+            if let Some(pb) = overall_pb {
+                pb.inc(delta);
+            }
+        }
+        WorkerMessage::Done => {}
+        WorkerMessage::Error(msg) => {
+            eprintln!("Worker error: {}", msg);
+        }
+    }
+}
+
 fn apply_suggestions(
     realization: &PathBuf,
     runner: &ModelRunner,
@@ -451,19 +524,15 @@ fn apply_suggestions(
         .unwrap_or(0);
 
     // Build a map: model_name → module index in the JSON array.
-    // The runner loads modules in dependency order which may differ from config order,
-    // so match by model_type_name.
     let config_modules = runner.config.modules();
 
     for s in suggestions {
-        // Find the module in the config that matches this model
         let module_json_idx = config_modules
             .iter()
             .position(|m| m.params.model_type_name == s.model_name);
 
         if let Some(idx) = module_json_idx {
             if idx < modules {
-                // Navigate safely with get_mut to avoid creating null entries
                 let params = root
                     .get_mut("global")
                     .and_then(|g| g.get_mut("formulations"))
@@ -474,7 +543,6 @@ fn apply_suggestions(
                     .and_then(|m| m.get_mut("params"));
 
                 if let Some(params) = params {
-                    // Create variables_names_map if it doesn't exist
                     if !params
                         .get("variables_names_map")
                         .is_some_and(|v| v.is_object())
@@ -515,7 +583,16 @@ fn run_worker(
     locations: &[String],
     data_dir: &PathBuf,
     #[cfg_attr(not(feature = "zarr"), allow(unused))] global_start: usize,
+    ipc_server_name: &str,
 ) -> Result<(), BmiError> {
+    // Connect to the parent's IPC server
+    let tx = IpcSender::<WorkerMessage>::connect(ipc_server_name.to_string()).map_err(|e| {
+        BmiError::FunctionFailed {
+            model: "runner".into(),
+            func: format!("Failed to connect to IPC server: {}", e),
+        }
+    })?;
+
     let mut runner = ModelRunner::from_config(realization)?;
     runner.suppress_warnings = true;
     let start_epoch = bmi_driver::parse_datetime(&runner.config.time.start_time)?;
@@ -552,11 +629,12 @@ fn run_worker(
         runner.finalize()?;
 
         if (i + 1) % report_interval == 0 || i + 1 == locations.len() {
-            println!("{}", i + 1);
+            let _ = tx.send(WorkerMessage::Progress((i + 1) as u64));
         }
     }
 
     store.finish()?;
+    let _ = tx.send(WorkerMessage::Done);
     Ok(())
 }
 

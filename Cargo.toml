@@ -25,6 +25,7 @@ rusqlite = { version = "0.37.0" }
 clap = { version = "4.5.53", features = ["derive"] }
 anyhow = "1.0.100"
 indicatif = "0.17"
+ipc-channel = "0.21"
 toml = "0.8"
 dirs = "5"
 zarrs = { version = "0.23", features = ["filesystem"], optional = true }
