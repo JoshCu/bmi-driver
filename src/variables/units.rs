@@ -566,25 +566,143 @@ const TIME_UNITS: &[(&str, f64)] = &[
     ("days", 86400.0),
 ];
 
-/// Convenience: get a conversion or fall back to identity with a warning message.
-pub fn find_conversion_or_identity(from: &str, to: &str) -> (UnitConversion, Option<String>) {
-    if let Some(conv) = find_conversion(from, to) {
-        (conv, None)
-    } else {
-        let warning = format!(
-            "Cannot convert '{}' → '{}': unrecognized or incompatible units, passing through unchanged",
-            from, to
-        );
+/// Try to find a conversion between a rate and a non-rate unit (or vice versa)
+/// by treating the non-rate unit as "per timestep".
+///
+/// For example, converting `mm/s` → `mm` with `dt_seconds = 3600` yields scale = 3600
+/// (i.e., mm/s × 3600s = mm per hour-long timestep).
+fn find_rate_accumulation_conversion(
+    from: &str,
+    to: &str,
+    dt_seconds: f64,
+) -> Option<UnitConversion> {
+    let from_trimmed = from.trim();
+    let to_trimmed = to.trim();
+    let from_norm = normalize(from_trimmed);
+    let to_norm = normalize(to_trimmed);
+
+    match (&from_norm, &to_norm) {
+        // Rate → Dimensional: multiply by timestep to accumulate
+        // e.g. mm/s → mm means mm/s × dt_seconds = mm/timestep
         (
-            UnitConversion {
-                from: from.to_string(),
-                to: to.to_string(),
-                scale: 1.0,
-                offset: 0.0,
+            NormalizedUnit::Rate {
+                quantity_to_si: q_from,
+                quantity_cat: cat_from,
+                time_to_si: t_from,
             },
-            Some(warning),
-        )
+            NormalizedUnit::Dimensional {
+                category: cat_to,
+                to_si: si_to,
+            },
+        ) if cat_from == cat_to => {
+            // Convert rate to SI (quantity_si / second), then multiply by dt to get accumulation,
+            // then convert from SI quantity to target unit.
+            // scale = (q_from / t_from) * dt_seconds / si_to
+            let scale = (q_from / t_from) * dt_seconds / si_to;
+            Some(UnitConversion {
+                from: from_trimmed.into(),
+                to: to_trimmed.into(),
+                scale,
+                offset: 0.0,
+            })
+        }
+
+        // Dimensional → Rate: divide by timestep
+        // e.g. mm → mm/s means mm/timestep ÷ dt_seconds = mm/s
+        (
+            NormalizedUnit::Dimensional {
+                category: cat_from,
+                to_si: si_from,
+            },
+            NormalizedUnit::Rate {
+                quantity_to_si: q_to,
+                quantity_cat: cat_to,
+                time_to_si: t_to,
+            },
+        ) if cat_from == cat_to => {
+            // Convert accumulation to SI, divide by dt to get SI rate, convert to target rate.
+            // scale = (si_from / dt_seconds) / (q_to / t_to)
+            let scale = (si_from / dt_seconds) / (q_to / t_to);
+            Some(UnitConversion {
+                from: from_trimmed.into(),
+                to: to_trimmed.into(),
+                scale,
+                offset: 0.0,
+            })
+        }
+
+        // MassFlux → Dimensional length: kg m-2 s-1 ≈ mm/s for liquid water
+        (NormalizedUnit::MassFlux { time_to_si: t_from }, NormalizedUnit::Dimensional {
+            category: UnitCategory::Length,
+            to_si: si_to,
+        }) => {
+            // kg m-2 per t_from seconds = 1 mm per t_from seconds (water density)
+            // rate in mm/s = 1/t_from, accumulation = rate × dt = dt/t_from mm
+            // convert mm to target: 0.001 m / si_to
+            let scale = (0.001 / t_from) * dt_seconds / si_to;
+            Some(UnitConversion {
+                from: from_trimmed.into(),
+                to: to_trimmed.into(),
+                scale,
+                offset: 0.0,
+            })
+        }
+
+        // Dimensional length → MassFlux
+        (NormalizedUnit::Dimensional {
+            category: UnitCategory::Length,
+            to_si: si_from,
+        }, NormalizedUnit::MassFlux { time_to_si: t_to }) => {
+            // Reverse: accumulation in source units → kg m-2 per t_to seconds
+            // source mm = si_from/0.001 mm, rate = si_from/(0.001 * dt) mm/s
+            // target = rate × t_to kg m-2 s-1 ... actually:
+            // 1 mm/s = 1 kg m-2 s-1, so mm/s × t_to = kg m-2 per t_to
+            let scale = (si_from / (0.001 * dt_seconds)) * t_to;
+            Some(UnitConversion {
+                from: from_trimmed.into(),
+                to: to_trimmed.into(),
+                scale,
+                offset: 0.0,
+            })
+        }
+
+        _ => None,
     }
+}
+
+/// Convenience: get a conversion or fall back to identity with a warning message.
+/// `dt_seconds` is the timestep duration used to convert between rates and accumulations.
+/// If a rate unit is converted to a non-rate unit (or vice versa), the non-rate unit is
+/// treated as "per timestep". Pass `None` to disable rate↔accumulation conversion.
+pub fn find_conversion_or_identity(
+    from: &str,
+    to: &str,
+    dt_seconds: Option<f64>,
+) -> (UnitConversion, Option<String>) {
+    if let Some(conv) = find_conversion(from, to) {
+        return (conv, None);
+    }
+
+    // Try rate ↔ accumulation conversion if we have a timestep
+    if let Some(dt) = dt_seconds {
+        if let Some(conv) = find_rate_accumulation_conversion(from, to, dt) {
+            return (conv, None);
+        }
+    }
+
+    let warning = format!(
+        "Cannot convert '{}' → '{}': unrecognized or incompatible units, passing through unchanged",
+        from, to
+    );
+    (
+        UnitConversion {
+            from: from.to_string(),
+            to: to.to_string(),
+            scale: 1.0,
+            offset: 0.0,
+        },
+        Some(warning),
+    )
 }
 
 #[cfg(test)]
@@ -683,7 +801,7 @@ mod tests {
 
     #[test]
     fn test_find_conversion_or_identity_unknown() {
-        let (conv, warning) = find_conversion_or_identity("furlongs", "mm");
+        let (conv, warning) = find_conversion_or_identity("furlongs", "mm", None);
         assert!(conv.is_identity());
         assert!(warning.is_some());
     }
@@ -722,5 +840,55 @@ mod tests {
     fn test_display_scale() {
         let conv = find_conversion("mm s^-1", "mm h^-1").unwrap();
         assert!(conv.to_string().contains("×3600"));
+    }
+
+    // --- Rate ↔ accumulation conversion tests ---
+
+    #[test]
+    fn test_rate_to_accumulation_mm_per_s_to_mm_hourly() {
+        // mm/s → mm with 3600s timestep: 1 mm/s × 3600s = 3600 mm
+        let (conv, warning) = find_conversion_or_identity("mm/s", "mm", Some(3600.0));
+        assert!(warning.is_none());
+        assert!((conv.scale - 3600.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_rate_to_accumulation_mm_per_h_to_mm_hourly() {
+        // mm/h → mm with 3600s timestep: 1 mm/h × 1h = 1 mm
+        let (conv, warning) = find_conversion_or_identity("mm/h", "mm", Some(3600.0));
+        assert!(warning.is_none());
+        assert!((conv.scale - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_rate_to_accumulation_m_per_s_to_mm() {
+        // m/s → mm with 3600s timestep: 1 m/s × 3600s = 3600 m = 3_600_000 mm
+        let (conv, warning) = find_conversion_or_identity("m/s", "mm", Some(3600.0));
+        assert!(warning.is_none());
+        assert!((conv.scale - 3_600_000.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_accumulation_to_rate_mm_to_mm_per_s() {
+        // mm → mm/s with 3600s timestep: 1 mm/3600s = 1/3600 mm/s
+        let (conv, warning) = find_conversion_or_identity("mm", "mm/s", Some(3600.0));
+        assert!(warning.is_none());
+        assert!((conv.scale - 1.0 / 3600.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_mass_flux_to_accumulation_mm() {
+        // kg m-2 s-1 → mm with 3600s timestep: 1 kg m-2 s-1 = 1 mm/s, × 3600 = 3600 mm
+        let (conv, warning) = find_conversion_or_identity("kg m-2 s-1", "mm", Some(3600.0));
+        assert!(warning.is_none());
+        assert!((conv.scale - 3600.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_rate_to_accumulation_without_timestep_returns_warning() {
+        // Without dt_seconds, rate→accumulation should fail and return identity+warning
+        let (conv, warning) = find_conversion_or_identity("mm/s", "mm", None);
+        assert!(warning.is_some());
+        assert!(conv.is_identity());
     }
 }

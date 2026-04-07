@@ -185,7 +185,7 @@ impl ModelRunner {
             self.vars.insert(output.clone(), VarSource::Model(idx));
         }
 
-        let input_conversions = self.build_unit_conversions(&*model, module);
+        let input_conversions = self.build_unit_conversions(&*model, module, timestep_info.dt_seconds);
 
         self.models.push(ModelInstance {
             name: module.params.model_type_name.clone(),
@@ -314,10 +314,12 @@ impl ModelRunner {
     }
 
     /// Build unit conversions for each input variable mapping.
+    /// `model_dt` is the model's timestep in seconds, used for rate↔accumulation conversions.
     fn build_unit_conversions(
         &self,
         model: &dyn Bmi,
         module: &ModuleConfig,
+        model_dt: f64,
     ) -> HashMap<String, UnitConversion> {
         let mut conversions = HashMap::new();
         for (model_input, source_var) in &module.params.variables_names_map {
@@ -326,7 +328,7 @@ impl ModelRunner {
 
             if !source_units.is_empty() && !dest_units.is_empty() {
                 let (conv, warning) =
-                    crate::units::find_conversion_or_identity(&source_units, &dest_units);
+                    crate::units::find_conversion_or_identity(&source_units, &dest_units, Some(model_dt));
                 if let Some(warn) = warning {
                     if !self.suppress_warnings {
                         eprintln!(

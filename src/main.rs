@@ -95,6 +95,11 @@ struct Args {
     #[arg(long)]
     config: Option<PathBuf>,
 
+    /// Path to the hydrofabric
+    ///
+    #[arg(long)]
+    hf: Option<PathBuf>,
+
     /// Number of parallel worker processes (default: number of CPUs)
     #[arg(short = 'j', long)]
     jobs: Option<usize>,
@@ -127,6 +132,9 @@ struct Args {
 fn main() -> Result<(), BmiError> {
     let args = Args::parse();
     let data_dir = fs::canonicalize(&args.data_dir).unwrap();
+    // Resolve optional paths before changing the working directory
+    let config_arg = args.config.map(|p| fs::canonicalize(&p).unwrap());
+    let hf_arg = args.hf.map(|p| fs::canonicalize(&p).unwrap());
     let _ = env::set_current_dir(&data_dir);
 
     preload_dependencies();
@@ -137,9 +145,7 @@ fn main() -> Result<(), BmiError> {
     }
 
     let config_dir = data_dir.join("config");
-    let realization = args
-        .config
-        .unwrap_or_else(|| config_dir.join("realization.json"));
+    let realization = config_arg.unwrap_or_else(|| config_dir.join("realization.json"));
 
     if args.minify {
         bmi_driver::config::minify_file(&realization)?;
@@ -147,13 +153,15 @@ fn main() -> Result<(), BmiError> {
         return Ok(());
     }
 
-    let db_path = config_dir
-        .read_dir()
-        .unwrap()
-        .filter_map(Result::ok)
-        .find(|entry| entry.path().extension().map_or(false, |ext| ext == "gpkg"))
-        .unwrap()
-        .path();
+    let db_path = hf_arg.unwrap_or_else(|| {
+        config_dir
+            .read_dir()
+            .unwrap()
+            .filter_map(Result::ok)
+            .find(|entry| entry.path().extension().map_or(false, |ext| ext == "gpkg"))
+            .unwrap()
+            .path()
+    });
 
     let conn = rusqlite::Connection::open(&db_path).unwrap();
     let mut stmt = conn.prepare("SELECT divide_id FROM 'divides'").unwrap();
