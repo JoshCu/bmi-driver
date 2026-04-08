@@ -3,6 +3,7 @@ mod types;
 mod variables;
 
 pub mod config;
+pub mod model_info;
 pub mod output;
 pub mod runner;
 

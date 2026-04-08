@@ -1,9 +1,10 @@
 use bmi_driver::{preload_dependencies, BmiError, DivideDataStore, ModelRunner, OutputFormat};
 use clap::Parser;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use ipc_channel::ipc::{self, IpcOneShotServer, IpcSender};
 use std::env;
 use std::fs;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::thread;
@@ -25,6 +26,27 @@ struct TomlConfig {
     progress: Option<ProgressMode>,
 }
 
+/// Messages sent from worker processes to the parent over IPC.
+#[derive(serde::Serialize, serde::Deserialize, Debug)]
+enum WorkerMessage {
+    /// First message: worker is ready and provides a channel for receiving config.
+    Ready(IpcSender<WorkerConfig>),
+    /// Worker completed `count` locations so far (cumulative).
+    Progress(u64),
+    /// Worker finished successfully.
+    Done,
+    /// Worker encountered an error.
+    Error(String),
+}
+
+/// Configuration sent from parent to worker over IPC.
+#[derive(serde::Serialize, serde::Deserialize, Debug)]
+struct WorkerConfig {
+    realization: PathBuf,
+    locations: Vec<String>,
+    global_start: usize,
+}
+
 fn load_toml_config() -> TomlConfig {
     let config_path = dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("~/.config"))
@@ -41,10 +63,42 @@ fn load_toml_config() -> TomlConfig {
     }
 }
 
+/// Resolve which output variables to write based on the realization config.
+///
+/// - `output_variables: ["all"]` → None (write all available variables)
+/// - `output_variables: [...]`   → Some(list) (write only those)
+/// - `output_variables` empty    → Some(vec![main_output_variable])
+fn resolve_output_vars(config: &bmi_driver::config::RealizationConfig) -> Option<Vec<String>> {
+    let formulation = config.global.formulations.first()?;
+    let output_vars = &formulation.params.output_variables;
+
+    if output_vars.len() == 1 && output_vars[0].eq_ignore_ascii_case("all") {
+        None
+    } else if output_vars.is_empty() {
+        let main = &formulation.params.main_output_variable;
+        if main.is_empty() {
+            None
+        } else {
+            Some(vec![main.clone()])
+        }
+    } else {
+        Some(output_vars.clone())
+    }
+}
+
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
     data_dir: PathBuf,
+
+    /// Path to the realization.json file
+    #[arg(long)]
+    config: Option<PathBuf>,
+
+    /// Path to the hydrofabric
+    ///
+    #[arg(long)]
+    hf: Option<PathBuf>,
 
     /// Number of parallel worker processes (default: number of CPUs)
     #[arg(short = 'j', long)]
@@ -54,17 +108,17 @@ struct Args {
     #[arg(long, value_enum)]
     progress: Option<ProgressMode>,
 
-    /// Internal: start index for worker mode (inclusive)
+    /// Internal: IPC server name for worker mode
     #[arg(long, hide = true)]
-    worker_start: Option<usize>,
-
-    /// Internal: end index for worker mode (exclusive)
-    #[arg(long, hide = true)]
-    worker_end: Option<usize>,
+    ipc_server: Option<String>,
 
     /// Print all unit conversion info and exit without running
     #[arg(long)]
     units: bool,
+
+    /// Print a summary of each model's inputs and outputs, then exit
+    #[arg(long)]
+    inspect: bool,
 
     /// Minify realization.json, removing fields bmi-driver doesn't use
     #[arg(long)]
@@ -77,19 +131,25 @@ struct Args {
     /// Number of locations to process on this node (0 = all remaining, for SLURM/multi-node use)
     #[arg(long, default_value_t = 0)]
     node_count: usize,
-
-    /// Internal: output variable names for zarr workers (comma-separated)
-    #[arg(long, hide = true)]
-    output_vars: Option<String>,
 }
 
 fn main() -> Result<(), BmiError> {
     let args = Args::parse();
     let data_dir = fs::canonicalize(&args.data_dir).unwrap();
-    let config_dir = data_dir.join("config");
+    // Resolve optional paths before changing the working directory
+    let config_arg = args.config.map(|p| fs::canonicalize(&p).unwrap());
+    let hf_arg = args.hf.map(|p| fs::canonicalize(&p).unwrap());
     let _ = env::set_current_dir(&data_dir);
 
-    let realization = config_dir.join("realization.json");
+    preload_dependencies();
+
+    // Worker mode: receive all config over IPC, skip geopackage/config resolution
+    if let Some(ipc_server) = args.ipc_server {
+        return run_worker(&data_dir, &ipc_server);
+    }
+
+    let config_dir = data_dir.join("config");
+    let realization = config_arg.unwrap_or_else(|| config_dir.join("realization.json"));
 
     if args.minify {
         bmi_driver::config::minify_file(&realization)?;
@@ -97,15 +157,15 @@ fn main() -> Result<(), BmiError> {
         return Ok(());
     }
 
-    preload_dependencies();
-
-    let db_path = config_dir
-        .read_dir()
-        .unwrap()
-        .filter_map(Result::ok)
-        .find(|entry| entry.path().extension().map_or(false, |ext| ext == "gpkg"))
-        .unwrap()
-        .path();
+    let db_path = hf_arg.unwrap_or_else(|| {
+        config_dir
+            .read_dir()
+            .unwrap()
+            .filter_map(Result::ok)
+            .find(|entry| entry.path().extension().map_or(false, |ext| ext == "gpkg"))
+            .unwrap()
+            .path()
+    });
 
     let conn = rusqlite::Connection::open(&db_path).unwrap();
     let mut stmt = conn.prepare("SELECT divide_id FROM 'divides'").unwrap();
@@ -115,8 +175,6 @@ fn main() -> Result<(), BmiError> {
     let locations: Vec<String> = rows.flatten().collect();
 
     // Apply node-level partitioning for multi-node / SLURM job-array use.
-    // --node-start and --node-count carve out this node's slice of the location list
-    // before the internal worker processes further sub-divide it with -j.
     let node_start = args.node_start.min(locations.len());
     let node_end = if args.node_count > 0 {
         (node_start + args.node_count).min(locations.len())
@@ -126,7 +184,11 @@ fn main() -> Result<(), BmiError> {
     let locations = locations[node_start..node_end].to_vec();
 
     if args.units {
-        return print_units(&realization, &locations);
+        return bmi_driver::model_info::print_units(&realization, &locations);
+    }
+
+    if args.inspect {
+        return bmi_driver::model_info::inspect_models(&realization, &locations);
     }
 
     // Merge: CLI > TOML > default
@@ -137,23 +199,7 @@ fn main() -> Result<(), BmiError> {
         .or(toml_cfg.progress)
         .unwrap_or(ProgressMode::Summary);
 
-    if let (Some(start), Some(end)) = (args.worker_start, args.worker_end) {
-        run_worker(&realization, &locations[start..end], &data_dir, start)
-    } else {
-        run_parent(&data_dir, &realization, &locations, jobs, progress)
-    }
-}
-
-fn print_units(realization: &PathBuf, locations: &[String]) -> Result<(), BmiError> {
-    let mut runner = ModelRunner::from_config(realization)?;
-    if let Some(loc) = locations.first() {
-        runner.initialize(loc)?;
-        runner.print_unit_conversions(false);
-        runner.finalize()?;
-    } else {
-        eprintln!("No locations found.");
-    }
-    Ok(())
+    run_parent(&data_dir, &realization, &locations, jobs, progress)
 }
 
 fn run_parent(
@@ -179,14 +225,10 @@ fn run_parent(
             // Discover output variable names for zarr (needs to create arrays upfront)
             #[cfg(feature = "zarr")]
             {
-                let config_output_vars: Vec<String> = runner
-                    .config
-                    .global
-                    .formulations
-                    .first()
-                    .map(|f| f.params.output_variables.clone())
-                    .unwrap_or_default();
-                if config_output_vars.is_empty() {
+                if let Some(vars) = resolve_output_vars(&runner.config) {
+                    discovered_vars = vars;
+                } else {
+                    // "all" or no main_output — discover from models
                     for model in &runner.models {
                         if let Ok(names) = model.model.get_output_var_names() {
                             for name in names {
@@ -196,8 +238,6 @@ fn run_parent(
                             }
                         }
                     }
-                } else {
-                    discovered_vars = config_output_vars;
                 }
             }
 
@@ -229,15 +269,15 @@ fn run_parent(
                     // Re-initialize with updated config to show new conversions
                     let mut runner2 = ModelRunner::from_config(realization)?;
                     runner2.initialize(loc)?;
-                    runner2.print_unit_conversions(true);
+                    bmi_driver::model_info::print_unit_conversions(&runner2, true);
                     runner2.finalize()?;
                 } else {
                     eprintln!("Skipping. Running with current config.");
-                    runner.print_unit_conversions(true);
+                    bmi_driver::model_info::print_unit_conversions(&runner, true);
                     runner.finalize()?;
                 }
             } else {
-                runner.print_unit_conversions(true);
+                bmi_driver::model_info::print_unit_conversions(&runner, true);
                 runner.finalize()?;
             }
         }
@@ -257,7 +297,7 @@ fn run_parent(
 
     // For zarr: create the store before spawning workers so they can write directly
     #[cfg(feature = "zarr")]
-    let output_vars_csv: String = if output_format == OutputFormat::Zarr {
+    if output_format == OutputFormat::Zarr {
         let runner_tmp = ModelRunner::from_config(realization)?;
         let start_time = &runner_tmp.config.time.start_time;
         let interval = runner_tmp.config.time.output_interval;
@@ -274,10 +314,7 @@ fn run_parent(
             locations,
             &discovered_vars,
         )?;
-        discovered_vars.join(",")
-    } else {
-        String::new()
-    };
+    }
 
     let mp = MultiProgress::new();
 
@@ -319,26 +356,31 @@ fn run_parent(
         let end = ((i + 1) * chunk_size).min(n_locations);
         let worker_count = (end - start) as u64;
 
-        let mut cmd = Command::new(&exe);
-        cmd.arg(data_dir)
-            .arg("--worker-start")
-            .arg(start.to_string())
-            .arg("--worker-end")
-            .arg(end.to_string());
+        // Create an IPC one-shot server for this worker
+        let (server, server_name) =
+            IpcOneShotServer::<WorkerMessage>::new().map_err(|e| BmiError::FunctionFailed {
+                model: "runner".into(),
+                func: format!("Failed to create IPC server: {}", e),
+            })?;
 
-        #[cfg(feature = "zarr")]
-        if output_format == OutputFormat::Zarr && !output_vars_csv.is_empty() {
-            cmd.arg("--output-vars").arg(&output_vars_csv);
-        }
-
-        let mut child = cmd
-            .stdout(Stdio::piped())
+        let child = Command::new(&exe)
+            .arg(data_dir)
+            .arg("--ipc-server")
+            .arg(&server_name)
+            .stdout(Stdio::null())
             .stderr(Stdio::inherit())
             .spawn()
             .map_err(|e| BmiError::FunctionFailed {
                 model: "runner".into(),
                 func: format!("Failed to spawn worker: {}", e),
             })?;
+
+        // Prepare the config to send once the worker is ready
+        let worker_config = WorkerConfig {
+            realization: realization.clone(),
+            locations: locations[start..end].to_vec(),
+            global_start: start,
+        };
 
         let worker_pb = worker_style.as_ref().map(|style| {
             let pb = mp.add(ProgressBar::new(worker_count));
@@ -347,28 +389,57 @@ fn run_parent(
             pb
         });
 
-        let stdout = child.stdout.take().unwrap();
         let overall_pb = overall_pb.clone();
 
         let handle = thread::spawn(move || {
-            let reader = BufReader::new(stdout);
-            let mut prev = 0u64;
-            for line in reader.lines().flatten() {
-                if let Ok(count) = line.trim().parse::<u64>() {
-                    let delta = count - prev;
-                    if let Some(pb) = &worker_pb {
-                        pb.inc(delta);
-                    }
-                    if let Some(pb) = &overall_pb {
-                        pb.inc(delta);
-                    }
-                    prev = count;
+            // Accept the worker's connection — blocks until the worker connects.
+            // The first message is Ready(...) carrying a sender for WorkerConfig.
+            let (rx, first_msg) = match server.accept() {
+                Ok(pair) => pair,
+                Err(e) => {
+                    eprintln!("IPC accept failed for worker: {}", e);
+                    return child;
+                }
+            };
+
+            // Send configuration to the worker
+            if let WorkerMessage::Ready(config_tx) = first_msg {
+                if let Err(e) = config_tx.send(worker_config) {
+                    eprintln!("Failed to send config to worker: {}", e);
+                    return child;
                 }
             }
+
+            // Read progress messages until Done/Error or channel close
+            let mut prev_count: u64 = 0;
+            loop {
+                match rx.recv() {
+                    Ok(msg) => {
+                        let done = matches!(msg, WorkerMessage::Done | WorkerMessage::Error(_));
+                        if let WorkerMessage::Progress(count) = &msg {
+                            let delta = count.saturating_sub(prev_count);
+                            prev_count = *count;
+                            if let Some(pb) = &worker_pb {
+                                pb.inc(delta);
+                            }
+                            if let Some(pb) = &overall_pb {
+                                pb.inc(delta);
+                            }
+                        } else if let WorkerMessage::Error(err) = &msg {
+                            eprintln!("Worker error: {}", err);
+                        }
+                        if done {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+
             if let Some(pb) = worker_pb {
                 pb.finish_and_clear();
             }
-            child.wait()
+            child
         });
         handles.push(handle);
     }
@@ -376,15 +447,17 @@ fn run_parent(
     let mut failed = false;
     for handle in handles {
         match handle.join() {
-            Ok(Ok(status)) if status.success() => {}
-            Ok(Ok(status)) => {
-                eprintln!("Worker exited with: {}", status);
-                failed = true;
-            }
-            Ok(Err(e)) => {
-                eprintln!("Worker error: {}", e);
-                failed = true;
-            }
+            Ok(mut child) => match child.wait() {
+                Ok(status) if status.success() => {}
+                Ok(status) => {
+                    eprintln!("Worker exited with: {}", status);
+                    failed = true;
+                }
+                Err(e) => {
+                    eprintln!("Worker error: {}", e);
+                    failed = true;
+                }
+            },
             Err(_) => {
                 eprintln!("Worker thread panicked");
                 failed = true;
@@ -428,6 +501,7 @@ fn run_parent(
     Ok(())
 }
 
+
 fn apply_suggestions(
     realization: &PathBuf,
     runner: &ModelRunner,
@@ -443,27 +517,21 @@ fn apply_suggestions(
             func: format!("Failed to parse {}: {}", realization.display(), e),
         })?;
 
-    // Group suggestions by model_idx
     let modules = root["global"]["formulations"]
         .as_array()
         .and_then(|f| f.first())
         .and_then(|f| f["params"]["modules"].as_array().map(|a| a.len()))
         .unwrap_or(0);
 
-    // Build a map: model_name → module index in the JSON array.
-    // The runner loads modules in dependency order which may differ from config order,
-    // so match by model_type_name.
     let config_modules = runner.config.modules();
 
     for s in suggestions {
-        // Find the module in the config that matches this model
         let module_json_idx = config_modules
             .iter()
             .position(|m| m.params.model_type_name == s.model_name);
 
         if let Some(idx) = module_json_idx {
             if idx < modules {
-                // Navigate safely with get_mut to avoid creating null entries
                 let params = root
                     .get_mut("global")
                     .and_then(|g| g.get_mut("formulations"))
@@ -474,7 +542,6 @@ fn apply_suggestions(
                     .and_then(|m| m.get_mut("params"));
 
                 if let Some(params) = params {
-                    // Create variables_names_map if it doesn't exist
                     if !params
                         .get("variables_names_map")
                         .is_some_and(|v| v.is_object())
@@ -510,25 +577,39 @@ fn apply_suggestions(
     Ok(())
 }
 
-fn run_worker(
-    realization: &PathBuf,
-    locations: &[String],
-    data_dir: &PathBuf,
-    #[cfg_attr(not(feature = "zarr"), allow(unused))] global_start: usize,
-) -> Result<(), BmiError> {
-    let mut runner = ModelRunner::from_config(realization)?;
+fn run_worker(data_dir: &PathBuf, ipc_server_name: &str) -> Result<(), BmiError> {
+    // Connect to parent and send a Ready message with a config channel
+    let tx = IpcSender::<WorkerMessage>::connect(ipc_server_name.to_string()).map_err(|e| {
+        BmiError::FunctionFailed {
+            model: "runner".into(),
+            func: format!("Failed to connect to IPC server: {}", e),
+        }
+    })?;
+
+    let (config_tx, config_rx) =
+        ipc::channel::<WorkerConfig>().map_err(|e| BmiError::FunctionFailed {
+            model: "runner".into(),
+            func: format!("Failed to create config channel: {}", e),
+        })?;
+
+    tx.send(WorkerMessage::Ready(config_tx))
+        .map_err(|e| BmiError::FunctionFailed {
+            model: "runner".into(),
+            func: format!("Failed to send Ready: {}", e),
+        })?;
+
+    let config = config_rx.recv().map_err(|e| BmiError::FunctionFailed {
+        model: "runner".into(),
+        func: format!("Failed to receive worker config: {}", e),
+    })?;
+
+    let mut runner = ModelRunner::from_config(&config.realization)?;
     runner.suppress_warnings = true;
     let start_epoch = bmi_driver::parse_datetime(&runner.config.time.start_time)?;
     let interval = runner.config.time.output_interval;
     let output_format = runner.config.output_format;
     let output_path = data_dir.join(&runner.config.output_root);
-    let output_vars: Vec<String> = runner
-        .config
-        .global
-        .formulations
-        .first()
-        .map(|f| f.params.output_variables.clone())
-        .unwrap_or_default();
+    let output_vars = resolve_output_vars(&runner.config);
 
     let mut store = create_output_store(
         output_format,
@@ -536,39 +617,42 @@ fn run_worker(
         &runner,
         start_epoch,
         interval,
-        global_start,
-        locations.first().map(|s| s.as_str()),
+        config.global_start,
+        config.locations.first().map(|s| s.as_str()),
     )?;
 
-    let report_interval = ((locations.len() as f64) * 0.01).ceil().max(1.0) as usize;
+    let report_interval = ((config.locations.len() as f64) * 0.01).ceil().max(1.0) as usize;
 
-    for (i, location) in locations.iter().enumerate() {
+    for (i, location) in config.locations.iter().enumerate() {
         runner.initialize(location)?;
         runner.run()?;
 
-        let columns = collect_columns(&runner, &output_vars);
+        let columns = collect_columns(&runner, output_vars.as_deref());
         store.write_location(location, &columns)?;
 
         runner.finalize()?;
 
-        if (i + 1) % report_interval == 0 || i + 1 == locations.len() {
-            println!("{}", i + 1);
+        if (i + 1) % report_interval == 0 || i + 1 == config.locations.len() {
+            let _ = tx.send(WorkerMessage::Progress((i + 1) as u64));
         }
     }
 
     store.finish()?;
+    let _ = tx.send(WorkerMessage::Done);
     Ok(())
 }
 
-fn collect_columns(runner: &ModelRunner, output_vars: &[String]) -> Vec<(String, Vec<f64>)> {
-    if output_vars.is_empty() {
-        runner
+fn collect_columns(
+    runner: &ModelRunner,
+    output_vars: Option<&[String]>,
+) -> Vec<(String, Vec<f64>)> {
+    match output_vars {
+        None => runner
             .outputs
             .iter()
             .map(|(name, vals)| (name.clone(), vals.clone()))
-            .collect()
-    } else {
-        output_vars
+            .collect(),
+        Some(vars) => vars
             .iter()
             .filter_map(|name| {
                 runner
@@ -576,7 +660,7 @@ fn collect_columns(runner: &ModelRunner, output_vars: &[String]) -> Vec<(String,
                     .ok()
                     .map(|vals| (name.clone(), vals.clone()))
             })
-            .collect()
+            .collect(),
     }
 }
 

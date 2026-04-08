@@ -30,7 +30,6 @@ pub trait Forcings {
 #[derive(Debug, Clone)]
 struct VarInfo {
     units: String,
-    var_type: VarType,
     itemsize: i32,
     type_str: String,
 }
@@ -205,13 +204,12 @@ impl NetCdfForcings {
                 })
                 .unwrap_or_default();
 
-            let (type_str, itemsize, var_type) = Self::type_info(&var);
+            let (type_str, itemsize, _var_type) = Self::type_info(&var);
             self.var_names.push(name.clone());
             self.var_info.insert(
                 name,
                 VarInfo {
                     units,
-                    var_type,
                     itemsize,
                     type_str,
                 },
