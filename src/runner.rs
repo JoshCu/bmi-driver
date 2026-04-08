@@ -574,45 +574,7 @@ impl ModelRunner {
         }
     }
 
-    /// Print unit conversions to stderr.
-    /// If `active_only` is true, only prints non-identity conversions.
-    /// If false, prints all variable mappings including those without unit info.
-    pub fn print_unit_conversions(&self, active_only: bool) {
-        if !active_only {
-            eprintln!("Unit conversions for this run:");
-        }
-        let mut any = false;
-        for m in &self.models {
-            for (model_input, source_var) in &m.input_map {
-                let source_label = self.source_label(source_var);
-                if let Some(conv) = m.input_conversions.get(model_input) {
-                    if active_only && conv.is_identity() {
-                        continue;
-                    }
-                    eprintln!(
-                        "  {}: {} ← {} ({}): {}",
-                        m.name, model_input, source_var, source_label, conv
-                    );
-                } else if !active_only {
-                    eprintln!(
-                        "  {}: {} ← {} ({}): no unit info available",
-                        m.name, model_input, source_var, source_label
-                    );
-                } else {
-                    continue;
-                }
-                any = true;
-            }
-        }
-        if active_only && any {
-            eprintln!();
-        }
-        if !active_only && !any {
-            eprintln!("  (no variable mappings)");
-        }
-    }
-
-    fn source_label(&self, source_var: &str) -> String {
+    pub fn source_label(&self, source_var: &str) -> String {
         match self.vars.get(source_var) {
             Some(VarSource::Forcing) => "forcing".to_string(),
             Some(VarSource::Model(idx)) => self

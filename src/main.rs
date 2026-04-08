@@ -116,6 +116,10 @@ struct Args {
     #[arg(long)]
     units: bool,
 
+    /// Print a summary of each model's inputs and outputs, then exit
+    #[arg(long)]
+    inspect: bool,
+
     /// Minify realization.json, removing fields bmi-driver doesn't use
     #[arg(long)]
     minify: bool,
@@ -180,7 +184,11 @@ fn main() -> Result<(), BmiError> {
     let locations = locations[node_start..node_end].to_vec();
 
     if args.units {
-        return print_units(&realization, &locations);
+        return bmi_driver::model_info::print_units(&realization, &locations);
+    }
+
+    if args.inspect {
+        return bmi_driver::model_info::inspect_models(&realization, &locations);
     }
 
     // Merge: CLI > TOML > default
@@ -192,18 +200,6 @@ fn main() -> Result<(), BmiError> {
         .unwrap_or(ProgressMode::Summary);
 
     run_parent(&data_dir, &realization, &locations, jobs, progress)
-}
-
-fn print_units(realization: &PathBuf, locations: &[String]) -> Result<(), BmiError> {
-    let mut runner = ModelRunner::from_config(realization)?;
-    if let Some(loc) = locations.first() {
-        runner.initialize(loc)?;
-        runner.print_unit_conversions(false);
-        runner.finalize()?;
-    } else {
-        eprintln!("No locations found.");
-    }
-    Ok(())
 }
 
 fn run_parent(
@@ -273,15 +269,15 @@ fn run_parent(
                     // Re-initialize with updated config to show new conversions
                     let mut runner2 = ModelRunner::from_config(realization)?;
                     runner2.initialize(loc)?;
-                    runner2.print_unit_conversions(true);
+                    bmi_driver::model_info::print_unit_conversions(&runner2, true);
                     runner2.finalize()?;
                 } else {
                     eprintln!("Skipping. Running with current config.");
-                    runner.print_unit_conversions(true);
+                    bmi_driver::model_info::print_unit_conversions(&runner, true);
                     runner.finalize()?;
                 }
             } else {
-                runner.print_unit_conversions(true);
+                bmi_driver::model_info::print_unit_conversions(&runner, true);
                 runner.finalize()?;
             }
         }
