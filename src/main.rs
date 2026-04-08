@@ -411,11 +411,23 @@ fn run_parent(
             }
 
             // Read progress messages until Done/Error or channel close
+            let mut prev_count: u64 = 0;
             loop {
                 match rx.recv() {
                     Ok(msg) => {
                         let done = matches!(msg, WorkerMessage::Done | WorkerMessage::Error(_));
-                        handle_worker_message(&msg, &worker_pb, &overall_pb);
+                        if let WorkerMessage::Progress(count) = &msg {
+                            let delta = count.saturating_sub(prev_count);
+                            prev_count = *count;
+                            if let Some(pb) = &worker_pb {
+                                pb.inc(delta);
+                            }
+                            if let Some(pb) = &overall_pb {
+                                pb.inc(delta);
+                            }
+                        } else if let WorkerMessage::Error(err) = &msg {
+                            eprintln!("Worker error: {}", err);
+                        }
                         if done {
                             break;
                         }
@@ -489,29 +501,6 @@ fn run_parent(
     Ok(())
 }
 
-/// Process a single WorkerMessage, updating progress bars as needed.
-fn handle_worker_message(
-    msg: &WorkerMessage,
-    worker_pb: &Option<ProgressBar>,
-    overall_pb: &Option<ProgressBar>,
-) {
-    match msg {
-        WorkerMessage::Progress(count) => {
-            let current = worker_pb.as_ref().map_or(0, |pb| pb.position());
-            let delta = count.saturating_sub(current);
-            if let Some(pb) = worker_pb {
-                pb.inc(delta);
-            }
-            if let Some(pb) = overall_pb {
-                pb.inc(delta);
-            }
-        }
-        WorkerMessage::Done | WorkerMessage::Ready(_) => {}
-        WorkerMessage::Error(msg) => {
-            eprintln!("Worker error: {}", msg);
-        }
-    }
-}
 
 fn apply_suggestions(
     realization: &PathBuf,
