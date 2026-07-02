@@ -59,7 +59,7 @@ use crate::traits::{parse_time_units, Bmi, VarType};
 /// extended grid functions are never invoked by this adapter.
 pub struct BmiPython {
     model_name: String,
-    obj: PyObject,
+    obj: Py<PyAny>,
     initialized: bool,
     time_factor: f64,
     type_cache: Option<HashMap<String, VarType>>,
@@ -86,8 +86,8 @@ impl BmiPython {
         let module_path = &python_type[..dot_pos];
         let class_name = &python_type[dot_pos + 1..];
 
-        let obj = Python::with_gil(|py| -> PyResult<PyObject> {
-            let instance = py.import_bound(module_path)?.getattr(class_name)?.call0()?;
+        let obj = Python::attach(|py| -> PyResult<Py<PyAny>> {
+            let instance = py.import(module_path)?.getattr(class_name)?.call0()?;
             Ok(instance.unbind())
         })
         .map_err(|e| function_failed(name.clone(), format!("load_from_type: {e}")))?;
@@ -113,15 +113,15 @@ impl BmiPython {
         let name = name.into();
         let path = module_path.as_ref();
 
-        let obj = Python::with_gil(|py| -> PyResult<PyObject> {
+        let obj = Python::attach(|py| -> PyResult<Py<PyAny>> {
             // Prepend the module's parent directory to sys.path.
             let dir = path.parent().unwrap_or(Path::new("."));
-            let sys = py.import_bound("sys")?;
+            let sys = py.import("sys")?;
             sys.getattr("path")?
                 .call_method1("insert", (0, dir.to_str().unwrap_or(".")))?;
 
             let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("model");
-            let instance = py.import_bound(stem)?.getattr(class_name)?.call0()?;
+            let instance = py.import(stem)?.getattr(class_name)?.call0()?;
             Ok(instance.unbind())
         })
         .map_err(|e| function_failed(name.clone(), format!("load: {e}")))?;
@@ -200,12 +200,11 @@ impl BmiPython {
     }
 
     /// Create a numpy array from a Rust slice and pass it to `set_value(name, arr)`.
-    fn set_value_via_numpy<T>(&self, py: Python<'_>, name: &str, values: Vec<T>) -> PyResult<()>
+    fn set_value_via_numpy<'py, T>(&self, py: Python<'py>, name: &str, values: Vec<T>) -> PyResult<()>
     where
-        T: IntoPy<PyObject>,
-        Vec<T>: IntoPy<PyObject>,
+        T: IntoPyObject<'py>,
     {
-        let np = py.import_bound("numpy")?;
+        let np = py.import("numpy")?;
         let arr = np.call_method1("array", (values,))?;
         self.obj.call_method1(py, "set_value", (name, arr))?;
         Ok(())
@@ -236,7 +235,7 @@ impl Bmi for BmiPython {
             });
         }
         verify_config_path(config)?;
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             self.obj
                 .call_method1(py, "initialize", (config,))
                 .map_err(|e| self.py_err("initialize", e))
@@ -252,7 +251,7 @@ impl Bmi for BmiPython {
 
     fn update(&mut self) -> BmiResult<()> {
         check_initialized(self.initialized, &self.model_name)?;
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             self.obj
                 .call_method0(py, "update")
                 .map_err(|e| self.py_err("update", e))
@@ -262,7 +261,7 @@ impl Bmi for BmiPython {
 
     fn update_until(&mut self, time: f64) -> BmiResult<()> {
         check_initialized(self.initialized, &self.model_name)?;
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             self.obj
                 .call_method1(py, "update_until", (time,))
                 .map_err(|e| self.py_err("update_until", e))
@@ -274,7 +273,7 @@ impl Bmi for BmiPython {
         if !self.initialized {
             return Ok(());
         }
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             self.obj
                 .call_method0(py, "finalize")
                 .map_err(|e| self.py_err("finalize", e))
@@ -284,22 +283,22 @@ impl Bmi for BmiPython {
     }
 
     fn get_component_name(&self) -> BmiResult<String> {
-        Python::with_gil(|py| self.call0_str(py, "get_component_name"))
+        Python::attach(|py| self.call0_str(py, "get_component_name"))
     }
 
     fn get_input_item_count(&self) -> BmiResult<i32> {
         check_initialized(self.initialized, &self.model_name)?;
-        Python::with_gil(|py| self.call0_i32(py, "get_input_item_count"))
+        Python::attach(|py| self.call0_i32(py, "get_input_item_count"))
     }
 
     fn get_output_item_count(&self) -> BmiResult<i32> {
         check_initialized(self.initialized, &self.model_name)?;
-        Python::with_gil(|py| self.call0_i32(py, "get_output_item_count"))
+        Python::attach(|py| self.call0_i32(py, "get_output_item_count"))
     }
 
     fn get_input_var_names(&self) -> BmiResult<Vec<String>> {
         check_initialized(self.initialized, &self.model_name)?;
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             self.obj
                 .call_method0(py, "get_input_var_names")
                 .and_then(|r| r.extract::<Vec<String>>(py))
@@ -309,7 +308,7 @@ impl Bmi for BmiPython {
 
     fn get_output_var_names(&self) -> BmiResult<Vec<String>> {
         check_initialized(self.initialized, &self.model_name)?;
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             self.obj
                 .call_method0(py, "get_output_var_names")
                 .and_then(|r| r.extract::<Vec<String>>(py))
@@ -319,62 +318,62 @@ impl Bmi for BmiPython {
 
     fn get_var_grid(&self, name: &str) -> BmiResult<i32> {
         check_initialized(self.initialized, &self.model_name)?;
-        Python::with_gil(|py| self.call1_i32_str(py, "get_var_grid", name))
+        Python::attach(|py| self.call1_i32_str(py, "get_var_grid", name))
     }
 
     fn get_var_type(&self, name: &str) -> BmiResult<String> {
         check_initialized(self.initialized, &self.model_name)?;
-        Python::with_gil(|py| self.call1_str(py, "get_var_type", name))
+        Python::attach(|py| self.call1_str(py, "get_var_type", name))
     }
 
     fn get_var_units(&self, name: &str) -> BmiResult<String> {
         check_initialized(self.initialized, &self.model_name)?;
-        Python::with_gil(|py| self.call1_str(py, "get_var_units", name))
+        Python::attach(|py| self.call1_str(py, "get_var_units", name))
     }
 
     fn get_var_itemsize(&self, name: &str) -> BmiResult<i32> {
         check_initialized(self.initialized, &self.model_name)?;
-        Python::with_gil(|py| self.call1_i32_str(py, "get_var_itemsize", name))
+        Python::attach(|py| self.call1_i32_str(py, "get_var_itemsize", name))
     }
 
     fn get_var_nbytes(&self, name: &str) -> BmiResult<i32> {
         check_initialized(self.initialized, &self.model_name)?;
-        Python::with_gil(|py| self.call1_i32_str(py, "get_var_nbytes", name))
+        Python::attach(|py| self.call1_i32_str(py, "get_var_nbytes", name))
     }
 
     fn get_var_location(&self, name: &str) -> BmiResult<String> {
         check_initialized(self.initialized, &self.model_name)?;
-        Python::with_gil(|py| self.call1_str(py, "get_var_location", name))
+        Python::attach(|py| self.call1_str(py, "get_var_location", name))
     }
 
     fn get_current_time(&self) -> BmiResult<f64> {
         check_initialized(self.initialized, &self.model_name)?;
-        Python::with_gil(|py| self.call0_f64(py, "get_current_time"))
+        Python::attach(|py| self.call0_f64(py, "get_current_time"))
     }
 
     fn get_start_time(&self) -> BmiResult<f64> {
         check_initialized(self.initialized, &self.model_name)?;
-        Python::with_gil(|py| self.call0_f64(py, "get_start_time"))
+        Python::attach(|py| self.call0_f64(py, "get_start_time"))
     }
 
     fn get_end_time(&self) -> BmiResult<f64> {
         check_initialized(self.initialized, &self.model_name)?;
-        Python::with_gil(|py| self.call0_f64(py, "get_end_time"))
+        Python::attach(|py| self.call0_f64(py, "get_end_time"))
     }
 
     fn get_time_units(&self) -> BmiResult<String> {
         check_initialized(self.initialized, &self.model_name)?;
-        Python::with_gil(|py| self.call0_str(py, "get_time_units"))
+        Python::attach(|py| self.call0_str(py, "get_time_units"))
     }
 
     fn get_time_step(&self) -> BmiResult<f64> {
         check_initialized(self.initialized, &self.model_name)?;
-        Python::with_gil(|py| self.call0_f64(py, "get_time_step"))
+        Python::attach(|py| self.call0_f64(py, "get_time_step"))
     }
 
     fn get_value_f64(&self, name: &str) -> BmiResult<Vec<f64>> {
         check_initialized(self.initialized, &self.model_name)?;
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             self.get_value_ptr_list(py, name)
                 .and_then(|l| l.extract::<Vec<f64>>())
                 .map_err(|e| self.py_err("get_value_ptr", e))
@@ -383,7 +382,7 @@ impl Bmi for BmiPython {
 
     fn get_value_f32(&self, name: &str) -> BmiResult<Vec<f32>> {
         check_initialized(self.initialized, &self.model_name)?;
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             self.get_value_ptr_list(py, name)
                 .and_then(|l| l.extract::<Vec<f32>>())
                 .map_err(|e| self.py_err("get_value_ptr", e))
@@ -392,7 +391,7 @@ impl Bmi for BmiPython {
 
     fn get_value_i32(&self, name: &str) -> BmiResult<Vec<i32>> {
         check_initialized(self.initialized, &self.model_name)?;
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             self.get_value_ptr_list(py, name)
                 .and_then(|l| l.extract::<Vec<i32>>())
                 .map_err(|e| self.py_err("get_value_ptr", e))
@@ -401,35 +400,35 @@ impl Bmi for BmiPython {
 
     fn set_value_f64(&mut self, name: &str, values: &[f64]) -> BmiResult<()> {
         check_initialized(self.initialized, &self.model_name)?;
-        Python::with_gil(|py| self.set_value_via_numpy(py, name, values.to_vec()))
+        Python::attach(|py| self.set_value_via_numpy(py, name, values.to_vec()))
             .map_err(|e| self.py_err("set_value", e))
     }
 
     fn set_value_f32(&mut self, name: &str, values: &[f32]) -> BmiResult<()> {
         check_initialized(self.initialized, &self.model_name)?;
-        Python::with_gil(|py| self.set_value_via_numpy(py, name, values.to_vec()))
+        Python::attach(|py| self.set_value_via_numpy(py, name, values.to_vec()))
             .map_err(|e| self.py_err("set_value", e))
     }
 
     fn set_value_i32(&mut self, name: &str, values: &[i32]) -> BmiResult<()> {
         check_initialized(self.initialized, &self.model_name)?;
-        Python::with_gil(|py| self.set_value_via_numpy(py, name, values.to_vec()))
+        Python::attach(|py| self.set_value_via_numpy(py, name, values.to_vec()))
             .map_err(|e| self.py_err("set_value", e))
     }
 
     fn get_grid_rank(&self, grid: i32) -> BmiResult<i32> {
         check_initialized(self.initialized, &self.model_name)?;
-        Python::with_gil(|py| self.call1_i32_grid(py, "get_grid_rank", grid))
+        Python::attach(|py| self.call1_i32_grid(py, "get_grid_rank", grid))
     }
 
     fn get_grid_size(&self, grid: i32) -> BmiResult<i32> {
         check_initialized(self.initialized, &self.model_name)?;
-        Python::with_gil(|py| self.call1_i32_grid(py, "get_grid_size", grid))
+        Python::attach(|py| self.call1_i32_grid(py, "get_grid_size", grid))
     }
 
     fn get_grid_type(&self, grid: i32) -> BmiResult<String> {
         check_initialized(self.initialized, &self.model_name)?;
-        Python::with_gil(|py| self.call1_str_grid(py, "get_grid_type", grid))
+        Python::attach(|py| self.call1_str_grid(py, "get_grid_type", grid))
     }
 }
 

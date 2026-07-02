@@ -1,6 +1,6 @@
 [package]
 name = "bmi-driver"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Basic Model Interface (BMI) driver with support for C Fortran, and Python models."
 license = "MIT"
@@ -16,7 +16,7 @@ zarr = ["dep:zarrs"]
 static = ["netcdf/static", "rusqlite/bundled"]
 
 [dependencies]
-pyo3 = { version = "0.22", features = ["auto-initialize"], optional = true }
+pyo3 = { version = "0.28", features = ["auto-initialize", "abi3"], optional = true }
 thiserror = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
