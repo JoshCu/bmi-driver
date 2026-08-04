@@ -5,6 +5,12 @@ RUN dnf install -y python3.11-devel g++ cmake
 COPY . .
 RUN cargo build --release --features static
 
+FROM ngiab_build AS rs_route
+RUN dnf install -y gfortran
+WORKDIR /build_route
+ADD https://github.com/ciroh-ua/rs_route.git .
+RUN cargo build --release --features static
+
 FROM awiciroh/ngiab AS ngiab
 COPY --from=ngiab_build /build/target/release/bmi-driver /usr/local/bin/bmi-driver
 VOLUME /data
@@ -18,6 +24,7 @@ RUN dnf install -y python3.11 libgfortran attr
 COPY --from=ngiab_build /build/target/release/bmi-driver /usr/local/bin/bmi-driver
 COPY --from=awiciroh/ngiab /dmod/datasets /dmod/datasets
 COPY --from=awiciroh/ngiab /dmod/shared_libs /dmod/shared_libs
+COPY --from=rs_route /build_route/target/release/rs-route /usr/local/bin/rs-route
 RUN echo "/dmod/shared_libs/" >> /etc/ld.so.conf.d/ngen.conf && ldconfig -v
 
 VOLUME /data
