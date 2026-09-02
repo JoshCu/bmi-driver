@@ -746,9 +746,9 @@ dependencies = [
 
 [[package]]
 name = "hdf5-metno-src"
-version = "0.9.5"
+version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "36b0303729f84fb0f2dc510d28b64cb716fb13e6a139a17e88db329123ecff82"
+checksum = "69c883c565498492954e344c482f8622525e58c7a71100dd9498c4940da82885"
 dependencies = [
  "cmake",
  "libz-sys",
@@ -756,9 +756,9 @@ dependencies = [
 
 [[package]]
 name = "hdf5-metno-sys"
-version = "0.10.1"
+version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "de20d5ba22c244493bdfefb91d8e9de08e3e58d96a792532da5e0df545aed279"
+checksum = "8139abe2218e47a40bdc7822a4365b620e23dce17e6b4735bbe6629410cdfedb"
 dependencies = [
  "hdf5-metno-src",
  "libc",
@@ -1107,9 +1107,9 @@ dependencies = [
 
 [[package]]
 name = "netcdf"
-version = "0.11.1"
+version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "73fd417ade2678f20854a4b26a183148f39eb7f9e259645a3c620d14e69d9da9"
+checksum = "db1b055d2ad9d2e845876173c99ac9d8874a56413d5579618da22df35abe342c"
 dependencies = [
  "bitflags",
  "libc",
@@ -1119,20 +1119,21 @@ dependencies = [
 
 [[package]]
 name = "netcdf-src"
-version = "0.4.4"
+version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6b8f8b8de3fd6087519fa6a64bc314a2d034faf218557413f63ff299983fa9d8"
+checksum = "9f8a4c2a96491452c12be9fe0ad0e6e20fd94cb5996eabd4cfcec51dfd4d898a"
 dependencies = [
  "cmake",
+ "hdf5-metno-src",
  "hdf5-metno-sys",
  "libz-sys",
 ]
 
 [[package]]
 name = "netcdf-sys"
-version = "0.8.3"
+version = "0.9.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6fb81047c7e146ae97620a1523e5fd136d53efb2c4aaaf34222fdacad8a5913c"
+checksum = "e0e415a9513a707eda0d14294c1dbefb19b87a8ff37511a36e969e71f0aa05f4"
 dependencies = [
  "curl-sys",
  "hdf5-metno-sys",
@@ -2436,13 +2437,13 @@ dependencies = [
 
 [[package]]
 name = "winreg"
-version = "0.52.0"
+version = "0.56.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a277a57398d4bfa075df44f501a17cfdf8542d224f0d36095a2adc7aee4ef0a5"
+checksum = "7d6f32a0ff4a9f6f01231eb2059cc85479330739333e0e58cadf03b6af2cca10"
 dependencies = [
  "cfg-if",
  "serde",
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
