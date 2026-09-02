@@ -141,7 +141,8 @@ fn write_forcings_locked(path: &Path) {
             .unwrap();
     }
 
-    let vars: [(&str, &str, fn(usize, usize) -> f32); 2] = [
+    type Generator = fn(usize, usize) -> f32;
+    let vars: [(&str, &str, Generator); 2] = [
         ("RAINRATE", "mm h-1", precip_mm_per_hour),
         ("T2D", "K", temperature_kelvin),
     ];

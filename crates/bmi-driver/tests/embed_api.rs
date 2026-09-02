@@ -194,3 +194,27 @@ fn total_steps_is_known_before_the_first_run() {
     assert_eq!(sim.total_steps(), 24);
     assert_eq!(sim.run("cat-1").unwrap().len(), sim.total_steps() + 1);
 }
+
+#[test]
+fn absolute_config_paths_are_left_alone() {
+    use bmi_driver::runner::resolve_path;
+    use std::path::Path;
+
+    // Real ngen realizations point library_file at /dmod/shared_libs/..., which must not be
+    // rewritten relative to the data directory.
+    let base = Path::new("/data/my_run");
+    assert_eq!(
+        resolve_path(base, "/dmod/shared_libs/libcfebmi.so.1.0.0"),
+        Path::new("/dmod/shared_libs/libcfebmi.so.1.0.0")
+    );
+    assert_eq!(
+        resolve_path(base, "./forcings/forcings.nc"),
+        Path::new("/data/my_run/./forcings/forcings.nc")
+    );
+    assert_eq!(
+        resolve_path(base, "libs/x.so"),
+        Path::new("/data/my_run/libs/x.so")
+    );
+    // An unset field stays unset, so callers can still test for "not provided".
+    assert_eq!(resolve_path(base, ""), Path::new(""));
+}

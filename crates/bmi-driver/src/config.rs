@@ -5,19 +5,14 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OutputFormat {
+    #[default]
     Csv,
     Netcdf,
     #[cfg(feature = "zarr")]
     Zarr,
-}
-
-impl Default for OutputFormat {
-    fn default() -> Self {
-        Self::Csv
-    }
 }
 
 fn is_default_output_format(f: &OutputFormat) -> bool {

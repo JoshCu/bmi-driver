@@ -1,3 +1,7 @@
+// pyo3 0.22's #[pymethods] wraps every return value in `.into()`, which clippy attributes to the
+// return type written here. The conversion is in generated code, so there is nothing to remove.
+#![allow(clippy::useless_conversion)]
+
 //! Python bindings: one `Model` class for every BMI adapter.
 //!
 //! The point of this module is that a Python caller should not have to know whether a model is C,
