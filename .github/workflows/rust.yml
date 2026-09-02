@@ -11,14 +11,41 @@ env:
 
 jobs:
   build:
-
     runs-on: ubuntu-latest
-
     steps:
     - uses: actions/checkout@v4
     - name: Install dependencies
-      run: sudo apt-get update && sudo apt-get install -y python3-dev libnetcdf-dev libhdf5-dev libsqlite3-dev
+      run: sudo apt-get update && sudo apt-get install -y python3-dev libnetcdf-dev libhdf5-dev libsqlite3-dev gfortran
     - name: Build
-      run: cargo build --verbose
+      run: cargo build --workspace --verbose
     - name: Run tests
-      run: cargo test --verbose
+      run: cargo test --workspace --verbose
+
+  # bmi-core must stay usable without the driver's IO stack -- that is what lets the Python
+  # extension module link the adapters without libnetcdf.
+  minimal:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install dependencies
+      run: sudo apt-get update && sudo apt-get install -y libnetcdf-dev libhdf5-dev
+    - name: bmi-core, no features
+      run: cargo build -p bmi-core --no-default-features
+    - name: bmi-driver, C adapter and CSV only
+      run: cargo build -p bmi-driver --no-default-features
+
+  python:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    - name: Install dependencies
+      run: |
+        sudo apt-get update && sudo apt-get install -y libnetcdf-dev libhdf5-dev
+        pip install maturin pytest numpy netCDF4
+    - name: Build and install the wheel
+      run: maturin build -m crates/bmi-py/Cargo.toml --release -o dist && pip install dist/*.whl
+    - name: Run tests
+      run: pytest crates/bmi-py/tests -q

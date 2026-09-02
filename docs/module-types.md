@@ -64,7 +64,7 @@ The adapter passes an opaque handle pointer as the first argument to all BMI cal
 
 ## bmi_python -- Python BMI classes
 
-**Requires:** `--features python`
+**Requires:** `--features python-embed` (or `python` when the host already runs an interpreter, as the Python package does)
 
 Loads a Python class that implements the BMI interface. Values are exchanged via numpy arrays. There are two ways to specify the Python class:
 

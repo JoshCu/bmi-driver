@@ -38,17 +38,15 @@ The config file is `<data_dir>/config/realization.json`. The format is compatibl
 ## Library usage
 
 ```rust
-use bmi_driver::{ModelRunner, BmiError};
+use bmi_driver::{BmiError, Simulation};
 
 fn main() -> Result<(), BmiError> {
-    let mut runner = ModelRunner::from_config("config/realization.json")?;
-    runner.initialize("cat-123")?;
-    runner.run()?;
-
-    let outputs = runner.main_outputs()?;
+    let mut sim = Simulation::open("/data/my_run")?;
+    let outputs = sim.run_variable("cat-123", "Q_OUT")?;
     println!("Completed {} timesteps", outputs.len());
-
-    runner.finalize()?;
     Ok(())
 }
 ```
+
+Relative paths above resolve against the data directory, not the process working directory.
+See [embedding.md](embedding.md) for the full API and the threading rules.

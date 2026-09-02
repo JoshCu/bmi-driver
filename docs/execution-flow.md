@@ -4,7 +4,7 @@ A high-level walkthrough of how `bmi-runner` processes a simulation from start t
 
 ## Startup
 
-The binary entry point is `main()` in `src/main.rs`. It:
+The binary entry point is `main()` in `crates/bmi-driver-cli/src/main.rs`. It:
 
 1. Parses CLI arguments (data directory, `--jobs`, `--progress`, etc.)
 2. Loads optional user config from `~/.config/bmi-driver/config.toml`
@@ -60,7 +60,7 @@ For each location ID in its assigned range, the worker:
 
 ## ModelRunner Initialization
 
-`ModelRunner` (`src/runner.rs`) is the core orchestrator. Initialization for a location involves:
+`ModelRunner` (`crates/bmi-driver/src/runner.rs`) is the core orchestrator. Initialization for a location involves:
 
 ### Loading Forcing Data
 
@@ -113,7 +113,7 @@ Each model input is mapped to a source variable (a forcing field or an upstream 
 
 ### Unit Conversion
 
-After fetching, each value passes through a linear conversion: `value = value * scale + offset`. The conversion factors are pre-computed during initialization by comparing source and destination unit strings. The unit system (`src/variables/units.rs`) handles notation variants like `mm/s`, `mm s^-1`, `mm s-1`, and temperature offsets (K/C/F).
+After fetching, each value passes through a linear conversion: `value = value * scale + offset`. The conversion factors are pre-computed during initialization by comparing source and destination unit strings. The unit system (`crates/bmi-core/src/units.rs`) handles notation variants like `mm/s`, `mm s^-1`, `mm s-1`, and temperature offsets (K/C/F).
 
 ### Output Collection
 
@@ -125,9 +125,9 @@ The runner supports three output formats, all implementing the `DivideDataStore`
 
 | Format | File | Behavior |
 |--------|------|----------|
-| **CSV** | `src/output/csv.rs` | One file per location at `<data_dir>/outputs/bmi-driver/<loc_id>.csv` with columns for time and each output variable |
-| **NetCDF** | `src/output/netcdf.rs` | Each worker writes a temporary `.nc` file; the parent merges them into `results.nc` |
-| **Zarr** | `src/output/zarr.rs` | Parent pre-creates the store with all dimensions; workers write slices in parallel |
+| **CSV** | `crates/bmi-driver/src/output/csv.rs` | One file per location at `<data_dir>/outputs/bmi-driver/<loc_id>.csv` with columns for time and each output variable |
+| **NetCDF** | `crates/bmi-driver/src/output/netcdf.rs` | Each worker writes a temporary `.nc` file; the parent merges them into `results.nc` |
+| **Zarr** | `crates/bmi-driver/src/output/zarr.rs` | Parent pre-creates the store with all dimensions; workers write slices in parallel |
 
 ## Summary Diagram
 

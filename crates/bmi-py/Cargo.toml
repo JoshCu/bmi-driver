@@ -1,18 +1,21 @@
+# Its own workspace on purpose -- see the `exclude` note in the repository root Cargo.toml.
+[workspace]
+
 [package]
 name = "bmi-py"
 description = "Python bindings for the bmi-driver BMI adapters."
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-authors.workspace = true
-repository.workspace = true
+version = "0.2.0"
+edition = "2021"
+license = "MIT"
+authors = ["Claude", "Josh Cu"]
+repository = "https://github.com/JoshCu/bmi-driver"
 
 [lib]
 name = "_bmi_driver"
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = ["fortran", "driver"]
+default = ["fortran", "python-models", "driver"]
 fortran = ["bmi-core/fortran", "bmi-driver?/fortran"]
 # The BMI Python adapter -- lets a Python caller drive a Python BMI model through the same
 # unified interface. Never enables pyo3/auto-initialize: the interpreter is already running.
@@ -22,7 +25,7 @@ driver = ["dep:bmi-driver"]
 zarr = ["bmi-driver?/zarr"]
 
 [dependencies]
-bmi-core = { workspace = true }
-bmi-driver = { workspace = true, optional = true, features = ["gpkg"] }
+bmi-core = { path = "../bmi-core", version = "0.2.0", default-features = false }
+bmi-driver = { path = "../bmi-driver", version = "0.2.0", default-features = false, features = ["gpkg"], optional = true }
 numpy = "0.22"
-pyo3 = { workspace = true, features = ["extension-module", "abi3-py39"] }
+pyo3 = { version = "0.22", features = ["extension-module", "abi3-py39"] }

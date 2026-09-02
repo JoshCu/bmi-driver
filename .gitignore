@@ -4,3 +4,6 @@ libs
 *.nc
 test_data/*
 !test_data/*.tar.gz
+
+# bmi-py is a separate workspace, so it has its own target directory.
+crates/bmi-py/target

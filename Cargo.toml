@@ -4,13 +4,11 @@ members = [
     "crates/bmi-core",
     "crates/bmi-driver",
     "crates/bmi-driver-cli",
-    "crates/bmi-py",
 ]
-default-members = [
-    "crates/bmi-core",
-    "crates/bmi-driver",
-    "crates/bmi-driver-cli",
-]
+# bmi-py is its own workspace, built by maturin. It must not be a member here: it enables
+# pyo3/extension-module, and cargo unifies features across a workspace build, which would strip
+# libpython out from under the CLI and fail to link it.
+exclude = ["crates/bmi-py"]
 
 [workspace.package]
 version = "0.2.0"
