@@ -1,0 +1,29 @@
+[package]
+name = "bmi-driver-cli"
+description = "Command line interface for bmi-driver."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[features]
+default = ["fortran", "python-embed", "zarr"]
+fortran = ["bmi-driver/fortran"]
+python-embed = ["bmi-driver/python-embed"]
+zarr = ["bmi-driver/zarr"]
+static = ["bmi-driver/static"]
+
+[dependencies]
+bmi-driver = { workspace = true, features = ["gpkg"] }
+clap = { version = "4.5.53", features = ["derive"] }
+dirs = "5"
+indicatif = "0.17"
+ipc-channel = "0.21"
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = "0.8"
+
+[[bin]]
+name = "bmi-driver"
+path = "src/main.rs"

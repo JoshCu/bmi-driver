@@ -1,0 +1,28 @@
+[package]
+name = "bmi-py"
+description = "Python bindings for the bmi-driver BMI adapters."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lib]
+name = "_bmi_driver"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["fortran", "driver"]
+fortran = ["bmi-core/fortran", "bmi-driver?/fortran"]
+# The BMI Python adapter -- lets a Python caller drive a Python BMI model through the same
+# unified interface. Never enables pyo3/auto-initialize: the interpreter is already running.
+python-models = ["bmi-core/python", "bmi-driver?/python"]
+# Forcings reading and whole-config Simulation. Requires libnetcdf at build and run time.
+driver = ["dep:bmi-driver"]
+zarr = ["bmi-driver?/zarr"]
+
+[dependencies]
+bmi-core = { workspace = true }
+bmi-driver = { workspace = true, optional = true, features = ["gpkg"] }
+numpy = "0.22"
+pyo3 = { workspace = true, features = ["extension-module", "abi3-py39"] }

@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use crate::error::{function_failed, BmiResult};
+use bmi_core::error::{function_failed, BmiResult};
 
 pub struct CsvStore {
     output_path: PathBuf,

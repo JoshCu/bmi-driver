@@ -1,4 +1,4 @@
-use crate::error::BmiResult;
+use bmi_core::error::BmiResult;
 
 pub mod csv;
 pub mod netcdf;

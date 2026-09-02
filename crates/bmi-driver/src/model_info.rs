@@ -1,11 +1,11 @@
 use std::path::Path;
 
-use crate::error::BmiResult;
+use bmi_core::error::BmiResult;
 use crate::runner::ModelRunner;
 
 /// Print all unit conversion info for the first location, then return.
-pub fn print_units(realization: &Path, locations: &[String]) -> BmiResult<()> {
-    let mut runner = ModelRunner::from_config(realization)?;
+pub fn print_units(realization: &Path, data_dir: &Path, locations: &[String]) -> BmiResult<()> {
+    let mut runner = ModelRunner::from_config(realization, data_dir)?;
     if let Some(loc) = locations.first() {
         runner.initialize(loc)?;
         print_unit_conversions(&runner, false);
@@ -17,8 +17,8 @@ pub fn print_units(realization: &Path, locations: &[String]) -> BmiResult<()> {
 }
 
 /// Print a summary of each model's inputs and outputs, then return.
-pub fn inspect_models(realization: &Path, locations: &[String]) -> BmiResult<()> {
-    let mut runner = ModelRunner::from_config(realization)?;
+pub fn inspect_models(realization: &Path, data_dir: &Path, locations: &[String]) -> BmiResult<()> {
+    let mut runner = ModelRunner::from_config(realization, data_dir)?;
     let loc = match locations.first() {
         Some(l) => l,
         None => {

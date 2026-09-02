@@ -1,46 +1,9 @@
-use crate::error::{BmiError, BmiResult};
+use bmi_core::error::{BmiError, BmiResult};
+pub use bmi_core::resample::{DownsampleMode, UpsampleMode};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-
-/// How to resample when the source has a coarser timestep than the destination.
-/// Example: daily source feeding an hourly model.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DownsampleMode {
-    /// Repeat the source value for all sub-steps (sample-and-hold)
-    Repeat,
-    /// Linearly interpolate between consecutive source values
-    Interpolate,
-}
-
-impl Default for DownsampleMode {
-    fn default() -> Self {
-        Self::Repeat
-    }
-}
-
-/// How to resample when the source has a finer timestep than the destination.
-/// Example: 5-minute source feeding an hourly model.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum UpsampleMode {
-    /// Arithmetic mean of all source values in the window
-    Mean,
-    /// Most frequent value (for categorical/integer data)
-    Mode,
-    /// Minimum value in the window
-    Min,
-    /// Maximum value in the window
-    Max,
-}
-
-impl Default for UpsampleMode {
-    fn default() -> Self {
-        Self::Mean
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]

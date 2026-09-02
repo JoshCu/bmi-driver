@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use crate::error::{function_failed, BmiError, BmiResult};
+use bmi_core::error::{function_failed, BmiError, BmiResult};
 
 fn err(msg: String) -> BmiError {
     function_failed("netcdf_writer", msg)
@@ -14,7 +14,12 @@ fn err(msg: String) -> BmiError {
 /// Suppress HDF5's default error handler which prints verbose diagnostics
 /// to stderr (e.g. "No such file or directory" when checking if a file exists
 /// before creating it). These are not real errors — just internal HDF5 checks.
-fn suppress_hdf5_errors() {
+pub fn suppress_hdf5_errors() {
+    crate::nc_lock::with_netcdf(suppress_hdf5_errors_locked)
+}
+
+/// Caller holds the netcdf lock.
+fn suppress_hdf5_errors_locked() {
     extern "C" {
         fn H5Eset_auto2(
             estack_id: i64,
@@ -186,7 +191,7 @@ fn init_netcdf(
 ) -> BmiResult<(netcdf::FileMut, Vec<String>)> {
     let n_times = total_steps + 1;
 
-    let mut file = netcdf::create(path)
+    let mut file = crate::nc_lock::with_netcdf(|| netcdf::create(path))
         .map_err(|e| err(format!("Failed to create {}: {}", path.display(), e)))?;
 
     file.add_dimension("time", n_times)
@@ -306,7 +311,7 @@ pub fn merge_netcdf_files(worker_files: &[PathBuf], output_path: &Path) -> BmiRe
     }
 
     // Open first file to get structure
-    let first = netcdf::open(&worker_files[0]).map_err(|e| {
+    let first = crate::nc_lock::with_netcdf_open(&worker_files[0]).map_err(|e| {
         err(format!(
             "Failed to open {}: {}",
             worker_files[0].display(),
@@ -348,7 +353,7 @@ pub fn merge_netcdf_files(worker_files: &[PathBuf], output_path: &Path) -> BmiRe
     drop(first);
 
     // Create merged file
-    let mut merged = netcdf::create(output_path)
+    let mut merged = crate::nc_lock::with_netcdf(|| netcdf::create(output_path))
         .map_err(|e| err(format!("Failed to create merged file: {}", e)))?;
 
     merged
@@ -388,7 +393,7 @@ pub fn merge_netcdf_files(worker_files: &[PathBuf], output_path: &Path) -> BmiRe
     // Copy data from each worker file
     let mut out_idx = 0usize;
     for worker_path in worker_files {
-        let src = netcdf::open(worker_path)
+        let src = crate::nc_lock::with_netcdf_open(worker_path)
             .map_err(|e| err(format!("Failed to open {}: {}", worker_path.display(), e)))?;
 
         let n_locs = src.dimension("id").map(|d| d.len()).unwrap_or(0);

@@ -1,6 +1,34 @@
-use crate::config::{DownsampleMode, UpsampleMode};
 use crate::error::{function_failed, BmiResult};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+
+/// How to resample when the source has a coarser timestep than the destination.
+/// Example: daily source feeding an hourly model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DownsampleMode {
+    /// Repeat the source value for all sub-steps (sample-and-hold)
+    #[default]
+    Repeat,
+    /// Linearly interpolate between consecutive source values
+    Interpolate,
+}
+
+/// How to resample when the source has a finer timestep than the destination.
+/// Example: 5-minute source feeding an hourly model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpsampleMode {
+    /// Arithmetic mean of all source values in the window
+    #[default]
+    Mean,
+    /// Most frequent value (for categorical/integer data)
+    Mode,
+    /// Minimum value in the window
+    Min,
+    /// Maximum value in the window
+    Max,
+}
 
 fn err(msg: String) -> crate::error::BmiError {
     function_failed("resample", msg)

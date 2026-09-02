@@ -1,0 +1,24 @@
+[package]
+name = "bmi-core"
+description = "BMI (Basic Model Interface) adapters for C, Fortran and Python models, plus unit conversion and resampling."
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[features]
+default = ["fortran"]
+fortran = []
+# Python BMI adapter. Use this when the host process already has a running
+# interpreter -- e.g. inside the `bmi-py` extension module.
+python = ["dep:pyo3"]
+# Python BMI adapter for programs that embed the interpreter (the CLI, and any
+# plain Rust binary). Links libpython; incompatible with `pyo3/extension-module`.
+python-embed = ["python", "pyo3/auto-initialize"]
+
+[dependencies]
+pyo3 = { workspace = true, optional = true }
+serde = { workspace = true }
+thiserror = { workspace = true }

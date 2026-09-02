@@ -6,7 +6,7 @@ use zarrs::filesystem::FilesystemStore;
 use zarrs::group::GroupBuilder;
 use zarrs::storage::ReadableWritableListableStorage;
 
-use crate::error::{function_failed, BmiError, BmiResult};
+use bmi_core::error::{function_failed, BmiError, BmiResult};
 
 fn err(msg: String) -> BmiError {
     function_failed("zarr_writer", msg)

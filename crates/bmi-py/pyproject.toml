@@ -1,0 +1,26 @@
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "bmi-driver"
+description = "One Python interface to C, Fortran and Python BMI models"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Josh Cu" }]
+readme = "README.md"
+dependencies = ["numpy>=1.20"]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+]
+dynamic = ["version"]
+
+[project.urls]
+Repository = "https://github.com/JoshCu/bmi-driver"
+
+[tool.maturin]
+module-name = "bmi_driver._bmi_driver"
+python-source = "python"
+manifest-path = "Cargo.toml"
+features = ["pyo3/extension-module"]

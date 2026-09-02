@@ -1,3 +1,4 @@
+use bmi_driver::simulation::resolve_output_vars;
 use bmi_driver::{preload_dependencies, BmiError, DivideDataStore, ModelRunner, OutputFormat};
 use clap::Parser;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
@@ -63,29 +64,6 @@ fn load_toml_config() -> TomlConfig {
     }
 }
 
-/// Resolve which output variables to write based on the realization config.
-///
-/// - `output_variables: ["all"]` → None (write all available variables)
-/// - `output_variables: [...]`   → Some(list) (write only those)
-/// - `output_variables` empty    → Some(vec![main_output_variable])
-fn resolve_output_vars(config: &bmi_driver::config::RealizationConfig) -> Option<Vec<String>> {
-    let formulation = config.global.formulations.first()?;
-    let output_vars = &formulation.params.output_variables;
-
-    if output_vars.len() == 1 && output_vars[0].eq_ignore_ascii_case("all") {
-        None
-    } else if output_vars.is_empty() {
-        let main = &formulation.params.main_output_variable;
-        if main.is_empty() {
-            None
-        } else {
-            Some(vec![main.clone()])
-        }
-    } else {
-        Some(output_vars.clone())
-    }
-}
-
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
@@ -135,11 +113,15 @@ struct Args {
 
 fn main() -> Result<(), BmiError> {
     let args = Args::parse();
-    let data_dir = fs::canonicalize(&args.data_dir).unwrap();
-    // Resolve optional paths before changing the working directory
-    let config_arg = args.config.map(|p| fs::canonicalize(&p).unwrap());
-    let hf_arg = args.hf.map(|p| fs::canonicalize(&p).unwrap());
-    let _ = env::set_current_dir(&data_dir);
+    let data_dir = fs::canonicalize(&args.data_dir).map_err(|e| {
+        BmiError::ConfigNotFound {
+            path: format!("{}: {}", args.data_dir.display(), e),
+        }
+    })?;
+    // Relative paths in the config resolve against data_dir, so the process working directory
+    // is left alone -- see bmi_driver::runner::resolve_path.
+    let config_arg = args.config.map(|p| fs::canonicalize(&p).unwrap_or(p));
+    let hf_arg = args.hf.map(|p| fs::canonicalize(&p).unwrap_or(p));
 
     preload_dependencies();
 
@@ -157,22 +139,11 @@ fn main() -> Result<(), BmiError> {
         return Ok(());
     }
 
-    let db_path = hf_arg.unwrap_or_else(|| {
-        config_dir
-            .read_dir()
-            .unwrap()
-            .filter_map(Result::ok)
-            .find(|entry| entry.path().extension().map_or(false, |ext| ext == "gpkg"))
-            .unwrap()
-            .path()
-    });
-
-    let conn = rusqlite::Connection::open(&db_path).unwrap();
-    let mut stmt = conn.prepare("SELECT divide_id FROM 'divides'").unwrap();
-    let rows = stmt
-        .query_map([], |row| Ok(row.get::<_, String>(0)?))
-        .unwrap();
-    let locations: Vec<String> = rows.flatten().collect();
+    let db_path = match hf_arg {
+        Some(p) => p,
+        None => bmi_driver::locations::find_gpkg(&data_dir)?,
+    };
+    let locations = bmi_driver::read_gpkg_locations(&db_path)?;
 
     // Apply node-level partitioning for multi-node / SLURM job-array use.
     let node_start = args.node_start.min(locations.len());
@@ -184,11 +155,11 @@ fn main() -> Result<(), BmiError> {
     let locations = locations[node_start..node_end].to_vec();
 
     if args.units {
-        return bmi_driver::model_info::print_units(&realization, &locations);
+        return bmi_driver::model_info::print_units(&realization, &data_dir, &locations);
     }
 
     if args.inspect {
-        return bmi_driver::model_info::inspect_models(&realization, &locations);
+        return bmi_driver::model_info::inspect_models(&realization, &data_dir, &locations);
     }
 
     // Merge: CLI > TOML > default
@@ -215,7 +186,7 @@ fn run_parent(
     #[cfg(feature = "zarr")]
     let mut discovered_vars: Vec<String> = Vec::new();
     {
-        let mut runner = ModelRunner::from_config(realization)?;
+        let mut runner = ModelRunner::from_config(realization, data_dir)?;
         output_format = runner.config.output_format;
         output_path = data_dir.join(&runner.config.output_root);
 
@@ -267,7 +238,7 @@ fn run_parent(
                     runner.finalize()?;
 
                     // Re-initialize with updated config to show new conversions
-                    let mut runner2 = ModelRunner::from_config(realization)?;
+                    let mut runner2 = ModelRunner::from_config(realization, data_dir)?;
                     runner2.initialize(loc)?;
                     bmi_driver::model_info::print_unit_conversions(&runner2, true);
                     runner2.finalize()?;
@@ -298,7 +269,7 @@ fn run_parent(
     // For zarr: create the store before spawning workers so they can write directly
     #[cfg(feature = "zarr")]
     if output_format == OutputFormat::Zarr {
-        let runner_tmp = ModelRunner::from_config(realization)?;
+        let runner_tmp = ModelRunner::from_config(realization, data_dir)?;
         let start_time = &runner_tmp.config.time.start_time;
         let interval = runner_tmp.config.time.output_interval;
         let start_epoch = bmi_driver::parse_datetime(start_time)?;
@@ -603,7 +574,7 @@ fn run_worker(data_dir: &PathBuf, ipc_server_name: &str) -> Result<(), BmiError>
         func: format!("Failed to receive worker config: {}", e),
     })?;
 
-    let mut runner = ModelRunner::from_config(&config.realization)?;
+    let mut runner = ModelRunner::from_config(&config.realization, data_dir)?;
     runner.suppress_warnings = true;
     let start_epoch = bmi_driver::parse_datetime(&runner.config.time.start_time)?;
     let interval = runner.config.time.output_interval;

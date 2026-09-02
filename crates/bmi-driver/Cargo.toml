@@ -1,0 +1,30 @@
+[package]
+name = "bmi-driver"
+description = "Basic Model Interface (BMI) driver with support for C, Fortran, and Python models."
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[features]
+default = ["fortran", "python-embed", "zarr", "gpkg"]
+fortran = ["bmi-core/fortran"]
+python = ["bmi-core/python"]
+python-embed = ["bmi-core/python-embed"]
+zarr = ["dep:zarrs"]
+# Reading location ids from a hydrofabric GeoPackage.
+gpkg = ["dep:rusqlite"]
+static = ["netcdf/static", "rusqlite?/bundled"]
+
+[dependencies]
+bmi-core = { workspace = true }
+netcdf = { version = "0.11.1", default-features = false }
+rusqlite = { version = "0.37.0", optional = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+zarrs = { version = "0.23", features = ["filesystem"], optional = true }
+
+[dev-dependencies]
+tempfile = "3"

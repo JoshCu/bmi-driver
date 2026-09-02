@@ -1,22 +1,36 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[cfg(feature = "fortran")]
-use crate::adapters::BmiFortran;
+use bmi_core::BmiFortran;
 #[cfg(feature = "python")]
-use crate::adapters::BmiPython;
-use crate::adapters::{BmiC, BmiSloth};
-use crate::aliases;
+use bmi_core::BmiPython;
+use bmi_core::{BmiC, BmiSloth};
+use bmi_core::aliases;
 use crate::config::{
     parse_datetime, BmiAdapterType, DownsampleMode, ModuleConfig, RealizationConfig, UpsampleMode,
 };
-use crate::error::{function_failed, BmiResult};
+use bmi_core::error::{function_failed, BmiResult};
 
 const TIMESTEP_EPSILON: f64 = 1e-9;
+
+/// Resolve a config path against the data directory. Absolute paths pass through unchanged,
+/// and an empty string stays empty so callers can still test for "not set".
+pub fn resolve_path(base_dir: &Path, path: &str) -> PathBuf {
+    if path.is_empty() {
+        return PathBuf::new();
+    }
+    let p = Path::new(path);
+    if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        base_dir.join(p)
+    }
+}
 use crate::forcings::{Forcings, NetCdfForcings};
-use crate::resample;
-use crate::traits::{Bmi, BmiExt};
-use crate::units::UnitConversion;
+use bmi_core::resample;
+use bmi_core::traits::{Bmi, BmiExt};
+use bmi_core::units::UnitConversion;
 
 #[derive(Debug, Clone)]
 pub struct TimestepInfo {
@@ -53,6 +67,8 @@ pub enum VarSource {
 
 pub struct ModelRunner {
     pub config: RealizationConfig,
+    /// Directory that relative paths in the config resolve against.
+    pub base_dir: PathBuf,
     pub forcings: NetCdfForcings,
     pub vars: HashMap<String, VarSource>,
     pub models: Vec<ModelInstance>,
@@ -69,13 +85,15 @@ pub struct ModelRunner {
 }
 
 impl ModelRunner {
-    pub fn from_config(path: impl AsRef<Path>) -> BmiResult<Self> {
-        Self::new(RealizationConfig::from_file(path)?)
+    /// Load a realization config, resolving its relative paths against `base_dir`.
+    pub fn from_config(path: impl AsRef<Path>, base_dir: impl Into<PathBuf>) -> BmiResult<Self> {
+        Self::new(RealizationConfig::from_file(path)?, base_dir)
     }
 
-    pub fn new(config: RealizationConfig) -> BmiResult<Self> {
+    pub fn new(config: RealizationConfig, base_dir: impl Into<PathBuf>) -> BmiResult<Self> {
         Ok(Self {
             config,
+            base_dir: base_dir.into(),
             forcings: NetCdfForcings::new("forcings"),
             vars: HashMap::new(),
             models: Vec::new(),
@@ -101,7 +119,9 @@ impl ModelRunner {
         self.location_id = loc_id.to_string();
         self.has_run = false;
 
-        self.forcings.initialize(&self.config.global.forcing.path)?;
+        let forcing_path = resolve_path(&self.base_dir, &self.config.global.forcing.path);
+        self.forcings
+            .initialize(&forcing_path.to_string_lossy())?;
         self.forcings.preload_location(loc_id)?;
 
         let start = parse_datetime(&self.config.time.start_time)?;
@@ -208,6 +228,7 @@ impl ModelRunner {
     ) -> BmiResult<Box<dyn Bmi>> {
         let is_sloth =
             module.name == "bmi_c++" && module.params.model_type_name.to_uppercase() == "SLOTH";
+        let library_file = resolve_path(&self.base_dir, &module.params.library_file);
 
         let mut model: Box<dyn Bmi> = if is_sloth {
             let mut sloth = BmiSloth::new(&module.params.model_type_name);
@@ -227,7 +248,7 @@ impl ModelRunner {
                     };
                     Box::new(BmiC::load(
                         &module.params.model_type_name,
-                        &module.params.library_file,
+                        &library_file,
                         reg,
                     )?)
                 }
@@ -236,14 +257,14 @@ impl ModelRunner {
                     if let Some(ref mw) = self.fortran_middleware {
                         Box::new(BmiFortran::load(
                             &module.params.model_type_name,
-                            &module.params.library_file,
+                            &library_file,
                             mw,
                             "register_bmi",
                         )?)
                     } else {
                         Box::new(BmiFortran::load_single(
                             &module.params.model_type_name,
-                            &module.params.library_file,
+                            &library_file,
                             "register_bmi",
                         )?)
                     }
@@ -260,7 +281,7 @@ impl ModelRunner {
                     {
                         Box::new(BmiPython::load(
                             &module.params.model_type_name,
-                            &module.params.library_file,
+                            &library_file,
                             &module.params.registration_function,
                         )?)
                     } else {
@@ -277,7 +298,8 @@ impl ModelRunner {
         if is_sloth {
             model.initialize("/dev/null")?;
         } else {
-            model.initialize(&module.params.init_config(loc_id))?;
+            let init_config = resolve_path(&self.base_dir, &module.params.init_config(loc_id));
+            model.initialize(&init_config.to_string_lossy())?;
             for (name, val) in module.params.params_f64() {
                 let _ = model.set_value(&name, &[val]);
             }
@@ -290,7 +312,7 @@ impl ModelRunner {
     fn query_model_timestep(&self, model: &dyn Bmi, module: &ModuleConfig) -> TimestepInfo {
         let model_dt_seconds = match (model.get_time_step(), model.get_time_units()) {
             (Ok(dt), Ok(units)) => {
-                let dt_sec = dt * crate::traits::parse_time_units(&units);
+                let dt_sec = dt * bmi_core::traits::parse_time_units(&units);
                 if dt_sec > 0.0 {
                     dt_sec
                 } else {
@@ -328,7 +350,7 @@ impl ModelRunner {
 
             if !source_units.is_empty() && !dest_units.is_empty() {
                 let (conv, warning) =
-                    crate::units::find_conversion_or_identity(&source_units, &dest_units, Some(model_dt));
+                    bmi_core::units::find_conversion_or_identity(&source_units, &dest_units, Some(model_dt));
                 if let Some(warn) = warning {
                     if !self.suppress_warnings {
                         eprintln!(
@@ -557,6 +579,12 @@ impl ModelRunner {
             }
             resample::aggregate(&vals, upsample_mode)
         }
+    }
+
+    /// Units of a variable, whether it comes from the forcings or from a model's output.
+    /// Empty if the variable is unknown or the model does not report units.
+    pub fn var_units(&self, name: &str) -> String {
+        self.get_source_units(name)
     }
 
     /// Get the units for a source variable (from forcings or a previous model's output).
