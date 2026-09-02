@@ -184,3 +184,13 @@ fn forcings_are_read_through_the_shared_handle() {
     a.finalize().unwrap();
     assert_eq!(b.series("RAINRATE", "cat-3").unwrap(), series_b);
 }
+
+#[test]
+fn total_steps_is_known_before_the_first_run() {
+    let Some(dir) = data_dir() else { return };
+
+    let mut sim = Simulation::open(dir).unwrap();
+    // Callers size their own buffers from this, so it cannot wait for a run to populate it.
+    assert_eq!(sim.total_steps(), 24);
+    assert_eq!(sim.run("cat-1").unwrap().len(), sim.total_steps() + 1);
+}

@@ -144,7 +144,7 @@ impl PySimulation {
         self.inner.var_units(location, variable).map_err(to_py_err)
     }
 
-    /// Unix epoch seconds for each output timestep.
+    /// Unix epoch seconds for each output timestep, including both ends.
     fn times<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<i64>> {
         let (start, interval) = (self.inner.start_epoch(), self.inner.output_interval());
         let steps = self.inner.total_steps() as i64 + 1;

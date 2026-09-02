@@ -66,6 +66,7 @@ pub struct Simulation {
     output_vars: Option<Vec<String>>,
     start_epoch: i64,
     interval: i64,
+    total_steps: usize,
 }
 
 impl Simulation {
@@ -94,11 +95,14 @@ impl Simulation {
         let start_epoch = parse_datetime(&runner.config.time.start_time)?;
         let interval = runner.config.time.output_interval;
         let output_vars = resolve_output_vars(&runner.config);
+        // From the config, not from the runner: this must be answerable before the first run.
+        let total_steps = total_steps(&runner.config)?;
         Ok(Self {
             runner,
             output_vars,
             start_epoch,
             interval,
+            total_steps,
         })
     }
 
@@ -169,9 +173,10 @@ impl Simulation {
         crate::locations::find_gpkg_locations(&self.runner.base_dir)
     }
 
-    /// Number of output timesteps per location.
+    /// Number of output intervals per location. A run returns `total_steps + 1` values, one at
+    /// each interval boundary including both ends.
     pub fn total_steps(&self) -> usize {
-        self.runner.total_steps
+        self.total_steps
     }
 
     pub fn start_epoch(&self) -> i64 {

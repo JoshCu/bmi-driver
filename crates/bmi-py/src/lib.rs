@@ -120,17 +120,35 @@ impl Model {
 
     /// A SLOTH-style constant provider: every entry becomes an output variable holding a fixed
     /// value. Useful for standing in for a model you have not written yet.
+    ///
+    /// Keys are variable names, values are the constants:
+    /// `Model.sloth({"land_surface_water__runoff_depth": 0.0})`. An ngen-style key that already
+    /// carries its own `name(count,type,units,location)` spec is passed through untouched, so
+    /// you can set per-variable types and units when you need to.
     #[classmethod]
-    #[pyo3(signature = (values, name = "SLOTH", dtype = "auto"))]
+    #[pyo3(signature = (values, units = "1", dtype = "double", name = "SLOTH"))]
     fn sloth(
         _cls: &Bound<'_, PyType>,
-        values: std::collections::HashMap<String, String>,
-        name: &str,
+        values: std::collections::HashMap<String, Bound<'_, PyAny>>,
+        units: &str,
         dtype: &str,
+        name: &str,
     ) -> PyResult<Self> {
+        let params = values
+            .into_iter()
+            .map(|(key, value)| {
+                let key = if key.contains('(') {
+                    key
+                } else {
+                    format!("{key}(1,{dtype},{units},node)")
+                };
+                Ok((key, value.str()?.to_string()))
+            })
+            .collect::<PyResult<std::collections::HashMap<String, String>>>()?;
+
         let mut model = bmi_core::BmiSloth::new(name);
-        model.configure(&values).map_err(to_py_err)?;
-        Ok(Self::new(Box::new(model), Dtype::parse(dtype)?))
+        model.configure(&params).map_err(to_py_err)?;
+        Ok(Self::new(Box::new(model), Dtype::Auto))
     }
 
     // --- lifecycle ---
