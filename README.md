@@ -2,7 +2,7 @@
 
 A parallel BMI (Basic Model Interface) orchestrator that dynamically loads and couples C, Fortran, and Python hydrological models. It reads NetCDF forcing data, resolves model dependencies, handles automatic unit conversion, and runs across many geographic locations in parallel.
 
-Three ways to use it: the `bmi-driver` command, a Rust library that hands results back as vectors, and a Python package that drives BMI models directly.
+Four ways to use it: the `bmi-driver` command, a Rust library that hands results back as vectors, a Python package that drives BMI models directly, and a WebAssembly build that drives them from JavaScript.
 
 ## Crates
 
@@ -12,6 +12,7 @@ Three ways to use it: the `bmi-driver` command, a Rust library that hands result
 | [`crates/bmi-driver`](crates/bmi-driver) | Configuration, forcings, the model runner and output writers. The embedding API. |
 | [`crates/bmi-driver-cli`](crates/bmi-driver-cli) | The `bmi-driver` binary. |
 | [`crates/bmi-py`](crates/bmi-py) | The `bmi_driver` Python package, built with maturin. Its own workspace: it enables `pyo3/extension-module`, and cargo unifying that across a workspace build would leave the CLI unable to link libpython. |
+| [`crates/bmi-wasm`](crates/bmi-wasm) | The C and SLOTH adapters compiled to `wasm32-unknown-emscripten`, with a C ABI for JavaScript. Its own workspace: it only targets Emscripten, and its linker flags must not apply to native builds of the other crates. |
 
 ## Building
 
@@ -20,6 +21,7 @@ cargo build --release                    # everything but the Python module
 cargo build --release --no-default-features   # C adapter and CSV output alone (fewest deps)
 cargo install --path crates/bmi-driver-cli   # install the CLI to ~/.cargo/bin/
 maturin build -m crates/bmi-py/Cargo.toml --release   # build the Python wheel
+(cd crates/bmi-wasm && ./build.sh)       # build the WebAssembly module (needs emsdk)
 ```
 
 Feature flags on `bmi-driver`: `fortran`, `python-embed`, `zarr`, `parquet`, `gpkg` (all on by default).

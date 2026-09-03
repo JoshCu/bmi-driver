@@ -1,0 +1,12 @@
+[build]
+target = "wasm32-unknown-emscripten"
+
+# MAIN_MODULE=1 keeps the full libc in the main module so dlopen'd model side
+# modules can resolve any symbol (printf, fopen, malloc, math, ...) against it.
+# Slimmer builds can switch to MAIN_MODULE=2 plus an explicit symbol list once
+# the set of models is known.
+[target.wasm32-unknown-emscripten]
+rustflags = [
+  "-C",
+  "link-args=-O2 -sGROWABLE_ARRAYBUFFERS=0 -sMAIN_MODULE=1 -sALLOW_MEMORY_GROWTH=1 -sMODULARIZE=1 -sEXPORT_ES6=1 -sEXPORT_NAME=createBmiModule -sENVIRONMENT=web,worker,node -sEXPORTED_RUNTIME_METHODS=FS,UTF8ToString,stringToNewUTF8,HEAP8,HEAPU8,HEAP32,HEAPF32,HEAPF64 -sEXPORTED_FUNCTIONS=_main,_malloc,_free,_bmi_open,_bmi_initialize,_bmi_update,_bmi_update_until,_bmi_finalize,_bmi_close,_bmi_last_error,_bmi_get_component_name,_bmi_get_input_var_names_json,_bmi_get_output_var_names_json,_bmi_get_var_info_json,_bmi_get_var_type_code,_bmi_get_value,_bmi_set_value,_bmi_get_current_time,_bmi_get_start_time,_bmi_get_end_time,_bmi_get_time_step,_bmi_get_time_units,_bmi_free_string,_bmi_free_buffer",
+]

@@ -1,0 +1,26 @@
+# Its own workspace on purpose -- like bmi-py, it targets a toolchain (Emscripten) the root
+# workspace doesn't build for, and the [target.wasm32-unknown-emscripten] rustflags in
+# .cargo/config.toml here must not leak into native builds of the other crates.
+[workspace]
+
+[package]
+name = "bmi-wasm"
+version = "0.2.0"
+description = "Emscripten build of the bmi-driver adapters: dlopen BMI model wasm side-modules from JavaScript."
+edition = "2021"
+license = "MIT"
+authors = ["Claude", "Josh Cu"]
+repository = "https://github.com/JoshCu/bmi-driver"
+publish = false
+
+[[bin]]
+name = "bmi"
+path = "src/main.rs"
+
+[dependencies]
+bmi-core = { path = "../bmi-core", version = "0.2.0", default-features = false }
+serde_json = "1.0"
+
+[profile.release]
+opt-level = "s"
+lto = true

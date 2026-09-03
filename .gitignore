@@ -7,3 +7,8 @@ test_data/*
 
 # bmi-py is a separate workspace, so it has its own target directory.
 crates/bmi-py/target
+
+# bmi-wasm is a separate workspace; pkg/ and test/model.wasm are build.sh output.
+crates/bmi-wasm/target
+crates/bmi-wasm/pkg
+crates/bmi-wasm/test/model.wasm
