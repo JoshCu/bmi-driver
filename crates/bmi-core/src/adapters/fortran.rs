@@ -6,7 +6,7 @@ use super::{check_initialized, cstr_to_string, impl_bmi_drop, to_cstring, verify
 use crate::error::{function_failed, BmiError, BmiResult};
 use crate::ffi::BMI_MAX_NAME;
 use crate::library::GlobalLibrary;
-use crate::traits::{parse_time_units, Bmi, VarType};
+use crate::traits::{parse_time_units, Bmi, VarInfo};
 
 type InitFn = unsafe extern "C" fn(*mut c_void, *const c_char) -> c_int;
 type UpdateFn = unsafe extern "C" fn(*mut c_void) -> c_int;
@@ -84,21 +84,24 @@ struct FortranFns {
 /// **Per-timestep** — called inside the simulation loop:
 /// - `update` — advance the model by one timestep.
 /// - `get_value_double` / `get_value_float` / `get_value_int` — typed function pointers (unlike
-///   the C adapter's single type-erased pointer). The adapter calls `get_var_nbytes` first to
-///   determine how many elements to allocate.
+///   the C adapter's single type-erased pointer). The adapter sizes the allocation from the
+///   cached `nbytes` (see below).
 /// - `set_value_double` / `set_value_float` / `set_value_int` — typed function pointers.
 ///
 /// **After `initialize`** (setup):
 /// - `get_time_units` — to compute the internal `time_factor`.
 /// - `get_input_item_count` / `get_output_item_count` → `get_input_var_names` /
-///   `get_output_var_names` → `get_var_type` + `get_var_itemsize` (per variable) — type cache.
+///   `get_output_var_names` → `get_var_type` + `get_var_itemsize` + `get_var_nbytes` (per
+///   variable) — type cache, also used to size `get_value` allocations without re-querying the
+///   model every timestep.
 ///
 /// **On demand**:
 /// - `update_until` — note: passes time by pointer (`*mut c_double`) rather than by value, per
 ///   Fortran convention.
-/// - `get_component_name`, `get_var_grid`, `get_var_units`, `get_var_nbytes`,
-///   `get_var_location`, `get_current_time`, `get_start_time`, `get_end_time`, `get_time_step`,
-///   `get_grid_rank`, `get_grid_size`, `get_grid_type`.
+/// - `get_component_name`, `get_var_grid`, `get_var_units`, `get_var_nbytes` (only if a variable
+///   wasn't seen during cache population), `get_var_location`, `get_current_time`,
+///   `get_start_time`, `get_end_time`, `get_time_step`, `get_grid_rank`, `get_grid_size`,
+///   `get_grid_type`.
 ///
 /// ## Functions NOT called
 ///
@@ -112,7 +115,7 @@ pub struct BmiFortran {
     handle: *mut c_void,
     initialized: bool,
     time_factor: f64,
-    type_cache: Option<HashMap<String, VarType>>,
+    type_cache: Option<HashMap<String, VarInfo>>,
 }
 
 macro_rules! load_fn {
@@ -263,7 +266,6 @@ impl BmiFortran {
     fn handle_ptr_mut(&mut self) -> *mut c_void {
         &mut self.handle as *mut *mut c_void as *mut c_void
     }
-
 }
 
 impl Bmi for BmiFortran {
@@ -273,10 +275,10 @@ impl Bmi for BmiFortran {
     fn is_initialized(&self) -> bool {
         self.initialized
     }
-    fn var_type_cache(&self) -> Option<&HashMap<String, VarType>> {
+    fn var_type_cache(&self) -> Option<&HashMap<String, VarInfo>> {
         self.type_cache.as_ref()
     }
-    fn var_type_cache_mut(&mut self) -> &mut Option<HashMap<String, VarType>> {
+    fn var_type_cache_mut(&mut self) -> &mut Option<HashMap<String, VarInfo>> {
         &mut self.type_cache
     }
     fn time_factor(&self) -> f64 {
@@ -293,7 +295,7 @@ impl Bmi for BmiFortran {
 
         let cconfig = to_cstring(config)?;
         if unsafe { (self.fns.initialize)(self.handle_ptr_mut(), cconfig.as_ptr()) } != 0 {
-            return Err(function_failed(&self.model_name,"initialize"));
+            return Err(function_failed(&self.model_name, "initialize"));
         }
 
         self.initialized = true;
@@ -308,7 +310,7 @@ impl Bmi for BmiFortran {
     fn update(&mut self) -> BmiResult<()> {
         check_initialized(self.initialized, &self.model_name)?;
         if unsafe { (self.fns.update)(self.handle_ptr_mut()) } != 0 {
-            return Err(function_failed(&self.model_name,"update"));
+            return Err(function_failed(&self.model_name, "update"));
         }
         Ok(())
     }
@@ -317,7 +319,7 @@ impl Bmi for BmiFortran {
         check_initialized(self.initialized, &self.model_name)?;
         let mut t = time;
         if unsafe { (self.fns.update_until)(self.handle_ptr_mut(), &mut t) } != 0 {
-            return Err(function_failed(&self.model_name,"update_until"));
+            return Err(function_failed(&self.model_name, "update_until"));
         }
         Ok(())
     }
@@ -329,7 +331,7 @@ impl Bmi for BmiFortran {
         let result = unsafe { (self.fns.finalize)(self.handle_ptr_mut()) };
         self.initialized = false;
         if result != 0 {
-            return Err(function_failed(&self.model_name,"finalize"));
+            return Err(function_failed(&self.model_name, "finalize"));
         }
         Ok(())
     }
@@ -340,7 +342,7 @@ impl Bmi for BmiFortran {
             (self.fns.get_component_name)(self.handle_ptr(), buf.as_mut_ptr() as *mut c_char)
         } != 0
         {
-            return Err(function_failed(&self.model_name,"get_component_name"));
+            return Err(function_failed(&self.model_name, "get_component_name"));
         }
         cstr_to_string(&buf)
     }
@@ -349,7 +351,7 @@ impl Bmi for BmiFortran {
         check_initialized(self.initialized, &self.model_name)?;
         let mut count = 0;
         if unsafe { (self.fns.get_input_item_count)(self.handle_ptr(), &mut count) } != 0 {
-            return Err(function_failed(&self.model_name,"get_input_item_count"));
+            return Err(function_failed(&self.model_name, "get_input_item_count"));
         }
         Ok(count)
     }
@@ -358,7 +360,7 @@ impl Bmi for BmiFortran {
         check_initialized(self.initialized, &self.model_name)?;
         let mut count = 0;
         if unsafe { (self.fns.get_output_item_count)(self.handle_ptr(), &mut count) } != 0 {
-            return Err(function_failed(&self.model_name,"get_output_item_count"));
+            return Err(function_failed(&self.model_name, "get_output_item_count"));
         }
         Ok(count)
     }
@@ -372,7 +374,7 @@ impl Bmi for BmiFortran {
             .map(|b| b.as_mut_ptr() as *mut c_char)
             .collect();
         if unsafe { (self.fns.get_input_var_names)(self.handle_ptr(), ptrs.as_mut_ptr()) } != 0 {
-            return Err(function_failed(&self.model_name,"get_input_var_names"));
+            return Err(function_failed(&self.model_name, "get_input_var_names"));
         }
         bufs.iter().map(|b| cstr_to_string(b)).collect()
     }
@@ -386,7 +388,7 @@ impl Bmi for BmiFortran {
             .map(|b| b.as_mut_ptr() as *mut c_char)
             .collect();
         if unsafe { (self.fns.get_output_var_names)(self.handle_ptr(), ptrs.as_mut_ptr()) } != 0 {
-            return Err(function_failed(&self.model_name,"get_output_var_names"));
+            return Err(function_failed(&self.model_name, "get_output_var_names"));
         }
         bufs.iter().map(|b| cstr_to_string(b)).collect()
     }
@@ -396,7 +398,7 @@ impl Bmi for BmiFortran {
         let cname = to_cstring(name)?;
         let mut grid = 0;
         if unsafe { (self.fns.get_var_grid)(self.handle_ptr(), cname.as_ptr(), &mut grid) } != 0 {
-            return Err(function_failed(&self.model_name,"get_var_grid"));
+            return Err(function_failed(&self.model_name, "get_var_grid"));
         }
         Ok(grid)
     }
@@ -413,7 +415,7 @@ impl Bmi for BmiFortran {
             )
         } != 0
         {
-            return Err(function_failed(&self.model_name,"get_var_type"));
+            return Err(function_failed(&self.model_name, "get_var_type"));
         }
         cstr_to_string(&buf)
     }
@@ -430,7 +432,7 @@ impl Bmi for BmiFortran {
             )
         } != 0
         {
-            return Err(function_failed(&self.model_name,"get_var_units"));
+            return Err(function_failed(&self.model_name, "get_var_units"));
         }
         cstr_to_string(&buf)
     }
@@ -441,7 +443,7 @@ impl Bmi for BmiFortran {
         let mut size = 0;
         if unsafe { (self.fns.get_var_itemsize)(self.handle_ptr(), cname.as_ptr(), &mut size) } != 0
         {
-            return Err(function_failed(&self.model_name,"get_var_itemsize"));
+            return Err(function_failed(&self.model_name, "get_var_itemsize"));
         }
         Ok(size)
     }
@@ -452,7 +454,7 @@ impl Bmi for BmiFortran {
         let mut nbytes = 0;
         if unsafe { (self.fns.get_var_nbytes)(self.handle_ptr(), cname.as_ptr(), &mut nbytes) } != 0
         {
-            return Err(function_failed(&self.model_name,"get_var_nbytes"));
+            return Err(function_failed(&self.model_name, "get_var_nbytes"));
         }
         Ok(nbytes)
     }
@@ -469,7 +471,7 @@ impl Bmi for BmiFortran {
             )
         } != 0
         {
-            return Err(function_failed(&self.model_name,"get_var_location"));
+            return Err(function_failed(&self.model_name, "get_var_location"));
         }
         cstr_to_string(&buf)
     }
@@ -478,7 +480,7 @@ impl Bmi for BmiFortran {
         check_initialized(self.initialized, &self.model_name)?;
         let mut time = 0.0;
         if unsafe { (self.fns.get_current_time)(self.handle_ptr(), &mut time) } != 0 {
-            return Err(function_failed(&self.model_name,"get_current_time"));
+            return Err(function_failed(&self.model_name, "get_current_time"));
         }
         Ok(time)
     }
@@ -487,7 +489,7 @@ impl Bmi for BmiFortran {
         check_initialized(self.initialized, &self.model_name)?;
         let mut time = 0.0;
         if unsafe { (self.fns.get_start_time)(self.handle_ptr(), &mut time) } != 0 {
-            return Err(function_failed(&self.model_name,"get_start_time"));
+            return Err(function_failed(&self.model_name, "get_start_time"));
         }
         Ok(time)
     }
@@ -496,7 +498,7 @@ impl Bmi for BmiFortran {
         check_initialized(self.initialized, &self.model_name)?;
         let mut time = 0.0;
         if unsafe { (self.fns.get_end_time)(self.handle_ptr(), &mut time) } != 0 {
-            return Err(function_failed(&self.model_name,"get_end_time"));
+            return Err(function_failed(&self.model_name, "get_end_time"));
         }
         Ok(time)
     }
@@ -507,7 +509,7 @@ impl Bmi for BmiFortran {
         if unsafe { (self.fns.get_time_units)(self.handle_ptr(), buf.as_mut_ptr() as *mut c_char) }
             != 0
         {
-            return Err(function_failed(&self.model_name,"get_time_units"));
+            return Err(function_failed(&self.model_name, "get_time_units"));
         }
         cstr_to_string(&buf)
     }
@@ -516,7 +518,7 @@ impl Bmi for BmiFortran {
         check_initialized(self.initialized, &self.model_name)?;
         let mut ts = 0.0;
         if unsafe { (self.fns.get_time_step)(self.handle_ptr(), &mut ts) } != 0 {
-            return Err(function_failed(&self.model_name,"get_time_step"));
+            return Err(function_failed(&self.model_name, "get_time_step"));
         }
         Ok(ts)
     }
@@ -524,41 +526,53 @@ impl Bmi for BmiFortran {
     // TODO: get_value_f64/f32/i32 and set_value_f64/f32/i32 could use a generic helper to reduce duplication. Deferred because the unsafe FFI calls need careful attention.
     fn get_value_f64(&self, name: &str) -> BmiResult<Vec<f64>> {
         check_initialized(self.initialized, &self.model_name)?;
-        let count = self.get_var_nbytes(name)? as usize / 8;
+        let nbytes = match self.cached_nbytes(name) {
+            Some(n) => n,
+            None => self.get_var_nbytes(name)?,
+        };
+        let count = nbytes as usize / 8;
         let mut vals = vec![0.0f64; count];
         let cname = to_cstring(name)?;
         if unsafe {
             (self.fns.get_value_double)(self.handle_ptr(), cname.as_ptr(), vals.as_mut_ptr())
         } != 0
         {
-            return Err(function_failed(&self.model_name,"get_value_double"));
+            return Err(function_failed(&self.model_name, "get_value_double"));
         }
         Ok(vals)
     }
 
     fn get_value_f32(&self, name: &str) -> BmiResult<Vec<f32>> {
         check_initialized(self.initialized, &self.model_name)?;
-        let count = self.get_var_nbytes(name)? as usize / 4;
+        let nbytes = match self.cached_nbytes(name) {
+            Some(n) => n,
+            None => self.get_var_nbytes(name)?,
+        };
+        let count = nbytes as usize / 4;
         let mut vals = vec![0.0f32; count];
         let cname = to_cstring(name)?;
         if unsafe {
             (self.fns.get_value_float)(self.handle_ptr(), cname.as_ptr(), vals.as_mut_ptr())
         } != 0
         {
-            return Err(function_failed(&self.model_name,"get_value_float"));
+            return Err(function_failed(&self.model_name, "get_value_float"));
         }
         Ok(vals)
     }
 
     fn get_value_i32(&self, name: &str) -> BmiResult<Vec<i32>> {
         check_initialized(self.initialized, &self.model_name)?;
-        let count = self.get_var_nbytes(name)? as usize / 4;
+        let nbytes = match self.cached_nbytes(name) {
+            Some(n) => n,
+            None => self.get_var_nbytes(name)?,
+        };
+        let count = nbytes as usize / 4;
         let mut vals = vec![0i32; count];
         let cname = to_cstring(name)?;
         if unsafe { (self.fns.get_value_int)(self.handle_ptr(), cname.as_ptr(), vals.as_mut_ptr()) }
             != 0
         {
-            return Err(function_failed(&self.model_name,"get_value_int"));
+            return Err(function_failed(&self.model_name, "get_value_int"));
         }
         Ok(vals)
     }
@@ -574,7 +588,7 @@ impl Bmi for BmiFortran {
             )
         } != 0
         {
-            return Err(function_failed(&self.model_name,"set_value_double"));
+            return Err(function_failed(&self.model_name, "set_value_double"));
         }
         Ok(())
     }
@@ -590,7 +604,7 @@ impl Bmi for BmiFortran {
             )
         } != 0
         {
-            return Err(function_failed(&self.model_name,"set_value_float"));
+            return Err(function_failed(&self.model_name, "set_value_float"));
         }
         Ok(())
     }
@@ -606,7 +620,7 @@ impl Bmi for BmiFortran {
             )
         } != 0
         {
-            return Err(function_failed(&self.model_name,"set_value_int"));
+            return Err(function_failed(&self.model_name, "set_value_int"));
         }
         Ok(())
     }
@@ -616,7 +630,7 @@ impl Bmi for BmiFortran {
         let mut g = grid;
         let mut rank = 0;
         if unsafe { (self.fns.get_grid_rank)(self.handle_ptr(), &mut g, &mut rank) } != 0 {
-            return Err(function_failed(&self.model_name,"get_grid_rank"));
+            return Err(function_failed(&self.model_name, "get_grid_rank"));
         }
         Ok(rank)
     }
@@ -626,7 +640,7 @@ impl Bmi for BmiFortran {
         let mut g = grid;
         let mut size = 0;
         if unsafe { (self.fns.get_grid_size)(self.handle_ptr(), &mut g, &mut size) } != 0 {
-            return Err(function_failed(&self.model_name,"get_grid_size"));
+            return Err(function_failed(&self.model_name, "get_grid_size"));
         }
         Ok(size)
     }
@@ -639,7 +653,7 @@ impl Bmi for BmiFortran {
             (self.fns.get_grid_type)(self.handle_ptr(), &mut g, buf.as_mut_ptr() as *mut c_char)
         } != 0
         {
-            return Err(function_failed(&self.model_name,"get_grid_type"));
+            return Err(function_failed(&self.model_name, "get_grid_type"));
         }
         cstr_to_string(&buf)
     }

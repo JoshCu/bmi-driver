@@ -8,10 +8,11 @@ authors.workspace = true
 repository.workspace = true
 
 [features]
-default = ["fortran", "python-embed", "zarr"]
+default = ["fortran", "python-embed", "zarr", "parquet"]
 fortran = ["bmi-driver/fortran"]
 python-embed = ["bmi-driver/python-embed"]
 zarr = ["bmi-driver/zarr"]
+parquet = ["bmi-driver/parquet"]
 static = ["bmi-driver/static"]
 
 [dependencies]

@@ -6,7 +6,7 @@ use super::{check_initialized, cstr_to_string, impl_bmi_drop, to_cstring, verify
 use crate::error::{function_failed, not_implemented, BmiError, BmiResult};
 use crate::ffi::{Bmi as BmiStruct, BMI_MAX_NAME, BMI_SUCCESS};
 use crate::library::GlobalLibrary;
-use crate::traits::{parse_time_units, Bmi, VarType};
+use crate::traits::{parse_time_units, Bmi, VarInfo};
 
 /// BMI adapter for C shared libraries.
 ///
@@ -23,22 +23,24 @@ use crate::traits::{parse_time_units, Bmi, VarType};
 /// **Per-timestep** — called inside the simulation loop:
 /// - `update` — advance the model by one timestep.
 /// - `get_value` — retrieve output values via a type-erased `*mut c_void` buffer. The adapter
-///   calls `get_var_nbytes` first to size the buffer, then passes the raw pointer to the single
-///   C `get_value` function pointer; all three Rust variants (`get_value_f64`, `get_value_f32`,
-///   `get_value_i32`) share this one pointer.
+///   sizes the buffer from the cached `nbytes` (see below), then passes the raw pointer to the
+///   single C `get_value` function pointer; all three Rust variants (`get_value_f64`,
+///   `get_value_f32`, `get_value_i32`) share this one pointer.
 /// - `set_value` — push input values via a type-erased `*mut c_void`; same single pointer for
 ///   all three Rust typed variants.
 ///
 /// **After `initialize`** (setup, not repeated per timestep):
 /// - `get_time_units` — used to compute the internal `time_factor`.
 /// - `get_input_var_names` / `get_output_var_names` (preceded by `get_input_item_count` /
-///   `get_output_item_count` to allocate buffers) — together with `get_var_type` and
-///   `get_var_itemsize` for each variable, to populate the type cache.
+///   `get_output_item_count` to allocate buffers) — together with `get_var_type`,
+///   `get_var_itemsize`, and `get_var_nbytes` for each variable, to populate the type cache used
+///   to size `get_value` buffers without re-querying the model every timestep.
 ///
 /// **On demand** (e.g. from the runner or `BmiExt`):
-/// - `update_until`, `get_component_name`, `get_var_grid`, `get_var_units`, `get_var_nbytes`,
-///   `get_var_location`, `get_current_time`, `get_start_time`, `get_end_time`, `get_time_step`,
-///   `get_grid_rank`, `get_grid_size`, `get_grid_type`.
+/// - `update_until`, `get_component_name`, `get_var_grid`, `get_var_units`, `get_var_nbytes`
+///   (only if a variable wasn't seen during cache population), `get_var_location`,
+///   `get_current_time`, `get_start_time`, `get_end_time`, `get_time_step`, `get_grid_rank`,
+///   `get_grid_size`, `get_grid_type`.
 ///
 /// ## Functions NOT called
 ///
@@ -52,7 +54,7 @@ pub struct BmiC {
     bmi: Box<BmiStruct>,
     initialized: bool,
     time_factor: f64,
-    type_cache: Option<HashMap<String, VarType>>,
+    type_cache: Option<HashMap<String, VarInfo>>,
 }
 
 impl BmiC {
@@ -189,10 +191,10 @@ impl Bmi for BmiC {
     fn is_initialized(&self) -> bool {
         self.initialized
     }
-    fn var_type_cache(&self) -> Option<&HashMap<String, VarType>> {
+    fn var_type_cache(&self) -> Option<&HashMap<String, VarInfo>> {
         self.type_cache.as_ref()
     }
-    fn var_type_cache_mut(&mut self) -> &mut Option<HashMap<String, VarType>> {
+    fn var_type_cache_mut(&mut self) -> &mut Option<HashMap<String, VarInfo>> {
         &mut self.type_cache
     }
     fn time_factor(&self) -> f64 {
@@ -356,7 +358,11 @@ impl Bmi for BmiC {
             .bmi
             .get_value
             .ok_or_else(|| not_implemented(&self.name, "get_value"))?;
-        let count = self.get_var_nbytes(name)? as usize / std::mem::size_of::<f64>();
+        let nbytes = match self.cached_nbytes(name) {
+            Some(n) => n,
+            None => self.get_var_nbytes(name)?,
+        };
+        let count = nbytes as usize / std::mem::size_of::<f64>();
         let mut vals = vec![0.0f64; count];
         let cname = to_cstring(name)?;
         if unsafe { func(self.ptr(), cname.as_ptr(), vals.as_mut_ptr() as *mut c_void) }
@@ -373,7 +379,11 @@ impl Bmi for BmiC {
             .bmi
             .get_value
             .ok_or_else(|| not_implemented(&self.name, "get_value"))?;
-        let count = self.get_var_nbytes(name)? as usize / std::mem::size_of::<f32>();
+        let nbytes = match self.cached_nbytes(name) {
+            Some(n) => n,
+            None => self.get_var_nbytes(name)?,
+        };
+        let count = nbytes as usize / std::mem::size_of::<f32>();
         let mut vals = vec![0.0f32; count];
         let cname = to_cstring(name)?;
         if unsafe { func(self.ptr(), cname.as_ptr(), vals.as_mut_ptr() as *mut c_void) }
@@ -390,7 +400,11 @@ impl Bmi for BmiC {
             .bmi
             .get_value
             .ok_or_else(|| not_implemented(&self.name, "get_value"))?;
-        let count = self.get_var_nbytes(name)? as usize / std::mem::size_of::<i32>();
+        let nbytes = match self.cached_nbytes(name) {
+            Some(n) => n,
+            None => self.get_var_nbytes(name)?,
+        };
+        let count = nbytes as usize / std::mem::size_of::<i32>();
         let mut vals = vec![0i32; count];
         let cname = to_cstring(name)?;
         if unsafe { func(self.ptr(), cname.as_ptr(), vals.as_mut_ptr() as *mut c_void) }

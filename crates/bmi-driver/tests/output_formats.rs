@@ -257,9 +257,101 @@ fn test_zarr_roundtrip() {
     }
 }
 
+// --- Parquet ---
+
+#[cfg(feature = "parquet")]
+fn read_parquet_data(path: &Path) -> Vec<(String, Vec<(String, Vec<f64>)>)> {
+    use arrow_array::{Array, Float32Array, Int64Array, StringArray};
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    use std::collections::HashMap;
+    use std::fs::File;
+
+    let file = File::open(path).unwrap();
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
+    let var_names: Vec<String> = builder
+        .schema()
+        .fields()
+        .iter()
+        .skip(3) // id, time_step, time
+        .map(|f| f.name().clone())
+        .collect();
+    let reader = builder.build().unwrap();
+
+    // id -> (step -> [value per var])
+    let mut rows: HashMap<String, Vec<(i64, Vec<f64>)>> = HashMap::new();
+    for batch in reader {
+        let batch = batch.unwrap();
+        let ids = batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+        let steps = batch.column(1).as_any().downcast_ref::<Int64Array>().unwrap();
+        let var_cols: Vec<&Float32Array> = (0..var_names.len())
+            .map(|i| batch.column(3 + i).as_any().downcast_ref::<Float32Array>().unwrap())
+            .collect();
+        for row in 0..batch.num_rows() {
+            let vals: Vec<f64> = var_cols.iter().map(|c| c.value(row) as f64).collect();
+            rows.entry(ids.value(row).to_string())
+                .or_default()
+                .push((steps.value(row), vals));
+        }
+    }
+
+    LOCATIONS
+        .iter()
+        .map(|loc_id| {
+            let mut loc_rows = rows.remove(*loc_id).unwrap();
+            loc_rows.sort_by_key(|(step, _)| *step);
+            let columns: Vec<(String, Vec<f64>)> = var_names
+                .iter()
+                .enumerate()
+                .map(|(i, name)| {
+                    let vals: Vec<f64> = loc_rows.iter().map(|(_, row)| row[i]).collect();
+                    (name.clone(), vals)
+                })
+                .collect();
+            (loc_id.to_string(), columns)
+        })
+        .collect()
+}
+
+#[cfg(feature = "parquet")]
+#[test]
+fn test_parquet_roundtrip() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = generate_data();
+
+    let start_epoch = 1262304000i64;
+    let parquet_path = dir.path().join("test.parquet");
+    let mut store = bmi_driver::output::parquet::ParquetWriter::new(
+        parquet_path.clone(),
+        start_epoch,
+        INTERVAL,
+    )
+    .unwrap();
+    write_all(&mut store, &data);
+
+    let read_back = read_parquet_data(&parquet_path);
+    assert_eq!(read_back.len(), data.len());
+
+    for (orig, read) in data.iter().zip(read_back.iter()) {
+        assert_eq!(orig.0, read.0, "location ID mismatch");
+        assert_eq!(orig.1.len(), read.1.len(), "variable count mismatch");
+        for (orig_col, read_col) in orig.1.iter().zip(read.1.iter()) {
+            assert_eq!(orig_col.0, read_col.0, "variable name mismatch");
+            assert_eq!(orig_col.1.len(), read_col.1.len(), "value count mismatch for {}", orig_col.0);
+            for (i, (o, r)) in orig_col.1.iter().zip(read_col.1.iter()).enumerate() {
+                // Parquet stores f32, so tolerance must account for f64->f32->f64 roundtrip
+                assert!(
+                    (o - r).abs() < 1e-2,
+                    "Parquet value mismatch at step {} for {}: {} vs {}",
+                    i, orig_col.0, o, r
+                );
+            }
+        }
+    }
+}
+
 // --- Cross-format equivalence ---
 
-#[cfg(feature = "zarr")]
+#[cfg(all(feature = "zarr", feature = "parquet"))]
 #[test]
 fn test_all_formats_equivalent() {
     let dir = tempfile::tempdir().unwrap();
@@ -299,36 +391,53 @@ fn test_all_formats_equivalent() {
     let mut zarr_store = bmi_driver::output::zarr::ZarrStore::new(zarr_path.clone(), 0);
     write_all(&mut zarr_store, &data);
 
+    // Write Parquet
+    let parquet_path = dir.path().join("test.parquet");
+    let mut parquet_store = bmi_driver::output::parquet::ParquetWriter::new(
+        parquet_path.clone(),
+        start_epoch,
+        INTERVAL,
+    )
+    .unwrap();
+    write_all(&mut parquet_store, &data);
+
     // Read back
     let csv_data = read_csv_data(&csv_dir);
     let nc_data = read_netcdf_data(&nc_path);
     let zarr_data = read_zarr_data(&zarr_path);
+    let parquet_data = read_parquet_data(&parquet_path);
 
     // Compare location IDs
     assert_eq!(csv_data.len(), nc_data.len());
     assert_eq!(csv_data.len(), zarr_data.len());
+    assert_eq!(csv_data.len(), parquet_data.len());
 
     for loc_idx in 0..csv_data.len() {
         assert_eq!(csv_data[loc_idx].0, nc_data[loc_idx].0, "CSV vs NetCDF loc ID");
         assert_eq!(csv_data[loc_idx].0, zarr_data[loc_idx].0, "CSV vs Zarr loc ID");
+        assert_eq!(csv_data[loc_idx].0, parquet_data[loc_idx].0, "CSV vs Parquet loc ID");
 
         let csv_cols = &csv_data[loc_idx].1;
         let nc_cols = &nc_data[loc_idx].1;
         let zarr_cols = &zarr_data[loc_idx].1;
+        let parquet_cols = &parquet_data[loc_idx].1;
 
         assert_eq!(csv_cols.len(), nc_cols.len(), "CSV vs NetCDF var count");
         assert_eq!(csv_cols.len(), zarr_cols.len(), "CSV vs Zarr var count");
+        assert_eq!(csv_cols.len(), parquet_cols.len(), "CSV vs Parquet var count");
 
         for var_idx in 0..csv_cols.len() {
             let csv_vals = &csv_cols[var_idx].1;
             let nc_vals = &nc_cols[var_idx].1;
             let zarr_vals = &zarr_cols[var_idx].1;
+            let parquet_vals = &parquet_cols[var_idx].1;
 
             assert_eq!(csv_vals.len(), nc_vals.len(), "value count mismatch");
             assert_eq!(csv_vals.len(), zarr_vals.len(), "value count mismatch");
+            assert_eq!(csv_vals.len(), parquet_vals.len(), "value count mismatch");
 
             for step in 0..csv_vals.len() {
-                // NetCDF and Zarr store f32, CSV stores 9 decimal places
+                // NetCDF, Zarr, and Parquet store f32; CSV stores full precision
                 // Compare NetCDF ↔ Zarr (both f32, should be identical)
                 assert!(
                     (nc_vals[step] - zarr_vals[step]).abs() < 1e-6,
@@ -340,6 +449,12 @@ fn test_all_formats_equivalent() {
                     (csv_vals[step] - nc_vals[step]).abs() < 1e-2,
                     "CSV vs NetCDF mismatch at loc={}, var={}, step={}: {} vs {}",
                     loc_idx, csv_cols[var_idx].0, step, csv_vals[step], nc_vals[step]
+                );
+                // Compare NetCDF ↔ Parquet (both f32, should be identical)
+                assert!(
+                    (nc_vals[step] - parquet_vals[step]).abs() < 1e-6,
+                    "NetCDF vs Parquet mismatch at loc={}, var={}, step={}: {} vs {}",
+                    loc_idx, csv_cols[var_idx].0, step, nc_vals[step], parquet_vals[step]
                 );
             }
         }

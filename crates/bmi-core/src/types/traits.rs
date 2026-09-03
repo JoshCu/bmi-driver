@@ -35,6 +35,12 @@ impl VarType {
 }
 
 #[derive(Debug, Clone)]
+pub struct VarInfo {
+    pub var_type: VarType,
+    pub nbytes: i32,
+}
+
+#[derive(Debug, Clone)]
 pub enum BmiValue {
     Float(Vec<f32>),
     Double(Vec<f64>),
@@ -62,8 +68,8 @@ impl BmiValue {
 pub trait Bmi {
     fn name(&self) -> &str;
     fn is_initialized(&self) -> bool;
-    fn var_type_cache(&self) -> Option<&HashMap<String, VarType>>;
-    fn var_type_cache_mut(&mut self) -> &mut Option<HashMap<String, VarType>>;
+    fn var_type_cache(&self) -> Option<&HashMap<String, VarInfo>>;
+    fn var_type_cache_mut(&mut self) -> &mut Option<HashMap<String, VarInfo>>;
 
     fn initialize(&mut self, config: &str) -> BmiResult<()>;
     fn update(&mut self) -> BmiResult<()>;
@@ -114,7 +120,13 @@ pub trait Bmi {
     }
 
     fn cached_type(&self, name: &str) -> Option<VarType> {
-        self.var_type_cache().and_then(|c| c.get(name).cloned())
+        self.var_type_cache()
+            .and_then(|c| c.get(name).map(|v| v.var_type.clone()))
+    }
+
+    fn cached_nbytes(&self, name: &str) -> Option<i32> {
+        self.var_type_cache()
+            .and_then(|c| c.get(name).map(|v| v.nbytes))
     }
 
     fn cache_types(&mut self) -> BmiResult<()> {
@@ -130,7 +142,14 @@ pub trait Bmi {
         {
             let t = self.get_var_type(&name)?;
             let s = self.get_var_itemsize(&name)?;
-            cache.insert(name, VarType::from_bmi(&t, s));
+            let n = self.get_var_nbytes(&name)?;
+            cache.insert(
+                name,
+                VarInfo {
+                    var_type: VarType::from_bmi(&t, s),
+                    nbytes: n,
+                },
+            );
         }
         *self.var_type_cache_mut() = Some(cache);
         Ok(())

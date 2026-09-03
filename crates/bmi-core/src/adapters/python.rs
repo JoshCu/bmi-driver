@@ -5,7 +5,7 @@ use pyo3::prelude::*;
 
 use super::{check_initialized, impl_bmi_drop, verify_config_path};
 use crate::error::{function_failed, BmiError, BmiResult};
-use crate::traits::{parse_time_units, Bmi, VarType};
+use crate::traits::{parse_time_units, Bmi, VarInfo};
 
 /// BMI adapter for Python classes implementing the BMI interface.
 ///
@@ -62,7 +62,7 @@ pub struct BmiPython {
     obj: PyObject,
     initialized: bool,
     time_factor: f64,
-    type_cache: Option<HashMap<String, VarType>>,
+    type_cache: Option<HashMap<String, VarInfo>>,
 }
 
 impl BmiPython {
@@ -74,15 +74,15 @@ impl BmiPython {
     pub fn load_from_type(name: impl Into<String>, python_type: &str) -> BmiResult<Self> {
         let name = name.into();
 
-        let dot_pos = python_type
-            .rfind('.')
-            .ok_or_else(|| function_failed(
+        let dot_pos = python_type.rfind('.').ok_or_else(|| {
+            function_failed(
                 name.clone(),
                 format!(
                     "python_type '{}' must be a dotted path like 'package.module.ClassName'",
                     python_type
                 ),
-            ))?;
+            )
+        })?;
         let module_path = &python_type[..dot_pos];
         let class_name = &python_type[dot_pos + 1..];
 
@@ -219,10 +219,10 @@ impl Bmi for BmiPython {
     fn is_initialized(&self) -> bool {
         self.initialized
     }
-    fn var_type_cache(&self) -> Option<&HashMap<String, VarType>> {
+    fn var_type_cache(&self) -> Option<&HashMap<String, VarInfo>> {
         self.type_cache.as_ref()
     }
-    fn var_type_cache_mut(&mut self) -> &mut Option<HashMap<String, VarType>> {
+    fn var_type_cache_mut(&mut self) -> &mut Option<HashMap<String, VarInfo>> {
         &mut self.type_cache
     }
     fn time_factor(&self) -> f64 {

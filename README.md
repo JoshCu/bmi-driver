@@ -17,12 +17,12 @@ Three ways to use it: the `bmi-driver` command, a Rust library that hands result
 
 ```bash
 cargo build --release                    # everything but the Python module
+cargo build --release --no-default-features   # C adapter and CSV output alone (fewest deps)
 cargo install --path crates/bmi-driver-cli   # install the CLI to ~/.cargo/bin/
 maturin build -m crates/bmi-py/Cargo.toml --release   # build the Python wheel
 ```
 
-Feature flags on `bmi-driver`: `fortran`, `python-embed`, `zarr`, `gpkg` (all on by default).
-Use `--no-default-features` for the C adapter and CSV output alone.
+Feature flags on `bmi-driver`: `fortran`, `python-embed`, `zarr`, `parquet`, `gpkg` (all on by default).
 
 ### System dependencies
 
@@ -102,11 +102,12 @@ See [docs/configuration.md](docs/configuration.md) for all field reference table
 
 ## Output
 
-Output format is set via `output_format` in the config (`"csv"`, `"netcdf"`, or `"zarr"`). Default is CSV.
+Output format is set via `output_format` in the config (`"csv"`, `"netcdf"`, `"zarr"`, or `"parquet"`). Default is CSV.
 
 - **CSV**: One file per location at `outputs/bmi-driver/<location_id>.csv`
 - **NetCDF**: Single `outputs/bmi-driver/results.nc` with dimensions `[id, time]`
 - **Zarr**: Single `outputs/bmi-driver/results.zarr` store with chunking `[1, n_times]` per variable
+- **Parquet**: Single `outputs/bmi-driver/results.parquet`, long format with one row per `(id, time)` and columns `id`, `time_step`, `time`, then one column per output variable
 
 ## Using it from another program
 

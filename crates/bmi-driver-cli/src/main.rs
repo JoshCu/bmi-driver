@@ -469,9 +469,29 @@ fn run_parent(
             bmi_driver::output::netcdf::merge_netcdf_files(&worker_files, &final_path)?;
         }
     }
+
+    // Merge per-worker Parquet files into a single output file
+    #[cfg(feature = "parquet")]
+    if output_format == OutputFormat::Parquet {
+        let mut worker_files = Vec::new();
+        for i in 0..n_workers {
+            let start = i * chunk_size;
+            if start >= n_locations {
+                break;
+            }
+            let first_loc = &locations[start];
+            let tmp_path = output_path.join(format!("tmp_{}.parquet", first_loc));
+            if tmp_path.exists() {
+                worker_files.push(tmp_path);
+            }
+        }
+        if !worker_files.is_empty() {
+            let final_path = output_path.join("results.parquet");
+            bmi_driver::output::parquet::merge_parquet_files(&worker_files, &final_path)?;
+        }
+    }
     Ok(())
 }
-
 
 fn apply_suggestions(
     realization: &PathBuf,
@@ -670,6 +690,16 @@ fn create_output_store(
                 zarr_path,
                 global_start,
             )))
+        }
+        #[cfg(feature = "parquet")]
+        OutputFormat::Parquet => {
+            let first_loc = first_location.unwrap_or("output");
+            let parquet_path = output_path.join(format!("tmp_{}.parquet", first_loc));
+            Ok(Box::new(bmi_driver::output::parquet::ParquetWriter::new(
+                parquet_path,
+                start_epoch,
+                interval,
+            )?))
         }
     }
 }
