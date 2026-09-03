@@ -2,8 +2,16 @@ use crate::error::BmiResult;
 
 pub mod csv;
 pub mod netcdf;
+#[cfg(feature = "parquet")]
+pub mod parquet;
 #[cfg(feature = "zarr")]
 pub mod zarr;
+
+/// One location's collected output, handed to a background writer thread.
+pub struct LocationResult {
+    pub location_id: String,
+    pub columns: Vec<(String, Vec<f64>)>,
+}
 
 /// Unified write interface for per-location timeseries data.
 ///

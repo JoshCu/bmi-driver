@@ -49,6 +49,8 @@ pub enum OutputFormat {
     Netcdf,
     #[cfg(feature = "zarr")]
     Zarr,
+    #[cfg(feature = "parquet")]
+    Parquet,
 }
 
 impl Default for OutputFormat {
@@ -211,7 +213,6 @@ impl ModuleParams {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BmiAdapterType {
     C,
-    #[cfg(feature = "fortran")]
     Fortran,
     #[cfg(feature = "python")]
     Python,
@@ -221,7 +222,6 @@ impl BmiAdapterType {
     pub fn from_name(name: &str) -> Option<Self> {
         match name.to_lowercase().as_str() {
             "bmi_c" => Some(Self::C),
-            #[cfg(feature = "fortran")]
             "bmi_fortran" => Some(Self::Fortran),
             #[cfg(feature = "python")]
             "bmi_python" => Some(Self::Python),

@@ -27,10 +27,7 @@ fn suppress_hdf5_errors() {
     }
 }
 
-pub struct LocationResult {
-    pub location_id: String,
-    pub columns: Vec<(String, Vec<f64>)>,
-}
+use super::LocationResult;
 
 enum WriterMessage {
     Write(LocationResult),
@@ -78,20 +75,18 @@ impl NetCdfWriter {
     }
 
     pub fn write(&self, result: LocationResult) -> BmiResult<()> {
-        self.sender
-            .send(WriterMessage::Write(result))
-            .map_err(|_| {
-                // Channel closed — the writer thread died. Report the actual error.
-                if let Ok(guard) = self.thread_error.lock() {
-                    if let Some(ref e) = *guard {
-                        return BmiError::FunctionFailed {
-                            model: "netcdf_writer".into(),
-                            func: format!("Writer thread failed: {}", e),
-                        };
-                    }
+        self.sender.send(WriterMessage::Write(result)).map_err(|_| {
+            // Channel closed — the writer thread died. Report the actual error.
+            if let Ok(guard) = self.thread_error.lock() {
+                if let Some(ref e) = *guard {
+                    return BmiError::FunctionFailed {
+                        model: "netcdf_writer".into(),
+                        func: format!("Writer thread failed: {}", e),
+                    };
                 }
-                err("Writer thread exited unexpectedly".into())
-            })
+            }
+            err("Writer thread exited unexpectedly".into())
+        })
     }
 
     pub fn finish_owned(mut self) -> BmiResult<()> {
@@ -139,9 +134,9 @@ fn writer_thread(
     let batch_size = 50;
 
     let flush_batch = |file: &mut Option<netcdf::FileMut>,
-                           var_names: &mut Vec<String>,
-                           location_count: &mut usize,
-                           batch: &mut Vec<LocationResult>|
+                       var_names: &mut Vec<String>,
+                       location_count: &mut usize,
+                       batch: &mut Vec<LocationResult>|
      -> BmiResult<()> {
         if batch.is_empty() {
             return Ok(());
@@ -151,8 +146,7 @@ fn writer_thread(
             *file = Some(f);
             *var_names = names;
         }
-        *location_count =
-            write_batch(file.as_mut().unwrap(), batch, var_names, *location_count)?;
+        *location_count = write_batch(file.as_mut().unwrap(), batch, var_names, *location_count)?;
         batch.clear();
         Ok(())
     };

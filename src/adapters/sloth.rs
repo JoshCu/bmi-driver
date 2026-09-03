@@ -1,6 +1,6 @@
 use super::check_initialized;
 use crate::error::{function_failed, BmiResult};
-use crate::traits::{Bmi, VarType};
+use crate::traits::{Bmi, VarInfo, VarType};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
@@ -18,7 +18,7 @@ pub struct BmiSloth {
     initialized: bool,
     variables: HashMap<String, SlothVar>,
     var_names: Vec<String>,
-    type_cache: Option<HashMap<String, VarType>>,
+    type_cache: Option<HashMap<String, VarInfo>>,
     current_time: f64,
     time_step: f64,
 }
@@ -47,11 +47,12 @@ impl BmiSloth {
             }
         }
 
-        let cache: HashMap<String, VarType> = self
-            .variables
-            .iter()
-            .map(|(n, v)| (n.clone(), v.var_type.clone()))
-            .collect();
+        let mut cache = HashMap::new();
+        for name in &self.var_names {
+            let var_type = self.variables[name].var_type.clone();
+            let nbytes = self.get_var_nbytes(name)?;
+            cache.insert(name.clone(), VarInfo { var_type, nbytes });
+        }
         self.type_cache = Some(cache);
         Ok(())
     }
@@ -66,7 +67,10 @@ impl BmiSloth {
         let parts: Vec<&str> = key[paren_start + 1..paren_end].split(',').collect();
 
         if parts.len() != 4 {
-            return Err(function_failed("SLOTH", format!("Invalid param format: {}", key)));
+            return Err(function_failed(
+                "SLOTH",
+                format!("Invalid param format: {}", key),
+            ));
         }
 
         let count: usize = parts[0].trim().parse().unwrap_or(1);
@@ -81,10 +85,9 @@ impl BmiSloth {
             _ => VarType::Double,
         };
 
-        let value: f64 = val
-            .trim()
-            .parse()
-            .map_err(|_| function_failed("SLOTH", format!("Invalid value '{}' for {}", val, name)))?;
+        let value: f64 = val.trim().parse().map_err(|_| {
+            function_failed("SLOTH", format!("Invalid value '{}' for {}", val, name))
+        })?;
 
         Ok(Some((
             name,
@@ -113,10 +116,10 @@ impl Bmi for BmiSloth {
     fn is_initialized(&self) -> bool {
         self.initialized
     }
-    fn var_type_cache(&self) -> Option<&HashMap<String, VarType>> {
+    fn var_type_cache(&self) -> Option<&HashMap<String, VarInfo>> {
         self.type_cache.as_ref()
     }
-    fn var_type_cache_mut(&mut self) -> &mut Option<HashMap<String, VarType>> {
+    fn var_type_cache_mut(&mut self) -> &mut Option<HashMap<String, VarInfo>> {
         &mut self.type_cache
     }
 

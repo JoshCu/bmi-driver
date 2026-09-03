@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-#[cfg(feature = "fortran")]
 use crate::adapters::BmiFortran;
 #[cfg(feature = "python")]
 use crate::adapters::BmiPython;
@@ -58,7 +57,6 @@ pub struct ModelRunner {
     pub models: Vec<ModelInstance>,
     pub total_steps: usize,
     pub location_id: String,
-    #[cfg(feature = "fortran")]
     pub fortran_middleware: Option<String>,
     pub outputs: HashMap<String, Vec<f64>>,
     pub final_outputs: Vec<f64>,
@@ -81,7 +79,6 @@ impl ModelRunner {
             models: Vec::new(),
             total_steps: 0,
             location_id: String::new(),
-            #[cfg(feature = "fortran")]
             fortran_middleware: None,
             outputs: HashMap::new(),
             final_outputs: Vec::new(),
@@ -92,7 +89,6 @@ impl ModelRunner {
         })
     }
 
-    #[cfg(feature = "fortran")]
     pub fn set_fortran_middleware(&mut self, path: impl Into<String>) {
         self.fortran_middleware = Some(path.into());
     }
@@ -169,7 +165,10 @@ impl ModelRunner {
                     .filter(|d| !self.vars.contains_key(*d))
                     .cloned()
                     .collect();
-                return Err(function_failed("runner", format!("Missing dependencies: {:?}", missing)));
+                return Err(function_failed(
+                    "runner",
+                    format!("Missing dependencies: {:?}", missing),
+                ));
             }
         }
         Ok(())
@@ -185,7 +184,8 @@ impl ModelRunner {
             self.vars.insert(output.clone(), VarSource::Model(idx));
         }
 
-        let input_conversions = self.build_unit_conversions(&*model, module, timestep_info.dt_seconds);
+        let input_conversions =
+            self.build_unit_conversions(&*model, module, timestep_info.dt_seconds);
 
         self.models.push(ModelInstance {
             name: module.params.model_type_name.clone(),
@@ -201,11 +201,7 @@ impl ModelRunner {
     }
 
     /// Create and initialize the appropriate BMI adapter for a module config.
-    fn create_adapter(
-        &self,
-        module: &ModuleConfig,
-        loc_id: &str,
-    ) -> BmiResult<Box<dyn Bmi>> {
+    fn create_adapter(&self, module: &ModuleConfig, loc_id: &str) -> BmiResult<Box<dyn Bmi>> {
         let is_sloth =
             module.name == "bmi_c++" && module.params.model_type_name.to_uppercase() == "SLOTH";
 
@@ -215,7 +211,10 @@ impl ModelRunner {
             Box::new(sloth)
         } else {
             let adapter = BmiAdapterType::from_name(&module.name).ok_or_else(|| {
-                function_failed(&module.params.model_type_name, format!("Unknown adapter: {}", module.name))
+                function_failed(
+                    &module.params.model_type_name,
+                    format!("Unknown adapter: {}", module.name),
+                )
             })?;
 
             match adapter {
@@ -231,7 +230,6 @@ impl ModelRunner {
                         reg,
                     )?)
                 }
-                #[cfg(feature = "fortran")]
                 BmiAdapterType::Fortran => {
                     if let Some(ref mw) = self.fortran_middleware {
                         Box::new(BmiFortran::load(
@@ -327,8 +325,11 @@ impl ModelRunner {
             let source_units = self.get_source_units(source_var);
 
             if !source_units.is_empty() && !dest_units.is_empty() {
-                let (conv, warning) =
-                    crate::units::find_conversion_or_identity(&source_units, &dest_units, Some(model_dt));
+                let (conv, warning) = crate::units::find_conversion_or_identity(
+                    &source_units,
+                    &dest_units,
+                    Some(model_dt),
+                );
                 if let Some(warn) = warning {
                     if !self.suppress_warnings {
                         eprintln!(
@@ -462,10 +463,9 @@ impl ModelRunner {
         downsample_mode: DownsampleMode,
         upsample_mode: UpsampleMode,
     ) -> BmiResult<f64> {
-        let source_ts = self
-            .source_timesteps
-            .get(name)
-            .ok_or_else(|| function_failed("runner", format!("No timestep info for variable: {}", name)))?;
+        let source_ts = self.source_timesteps.get(name).ok_or_else(|| {
+            function_failed("runner", format!("No timestep info for variable: {}", name))
+        })?;
         let source_dt = source_ts.dt_seconds;
 
         match self.vars.get(name) {
@@ -485,15 +485,17 @@ impl ModelRunner {
                 )
             }
             Some(VarSource::Model(_)) => {
-                let source_data = self
-                    .outputs
-                    .get(name)
-                    .ok_or_else(|| function_failed("runner", format!("'{}' not yet computed", name)))?;
+                let source_data = self.outputs.get(name).ok_or_else(|| {
+                    function_failed("runner", format!("'{}' not yet computed", name))
+                })?;
                 // Fast path: same timestep
                 if (source_dt - dest_dt).abs() < TIMESTEP_EPSILON {
                     let step = (dest_time / source_dt).round() as usize;
                     return source_data.get(step).copied().ok_or_else(|| {
-                        function_failed("runner", format!("'{}' not available at step {}", name, step))
+                        function_failed(
+                            "runner",
+                            format!("'{}' not available at step {}", name, step),
+                        )
                     });
                 }
                 resample::resample_value(
@@ -505,7 +507,10 @@ impl ModelRunner {
                     upsample_mode,
                 )
             }
-            None => Err(function_failed("runner", format!("Unknown variable: {}", name))),
+            None => Err(function_failed(
+                "runner",
+                format!("Unknown variable: {}", name),
+            )),
         }
     }
 
@@ -553,7 +558,10 @@ impl ModelRunner {
                 }
             }
             if vals.is_empty() {
-                return Err(function_failed("runner", format!("No forcing data for '{}' in window", name)));
+                return Err(function_failed(
+                    "runner",
+                    format!("No forcing data for '{}' in window", name),
+                ));
             }
             resample::aggregate(&vals, upsample_mode)
         }

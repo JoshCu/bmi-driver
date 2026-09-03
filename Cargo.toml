@@ -9,10 +9,10 @@ repository = "https://github.com/JoshCu/bmi-driver"
 readme = "README.md"
 
 [features]
-default = ["fortran", "python", "zarr"]
-fortran = []
+default = ["zarr", "parquet"]
 python = ["dep:pyo3"]
 zarr = ["dep:zarrs"]
+parquet = ["dep:parquet", "dep:arrow-array", "dep:arrow-schema"]
 static = ["netcdf/static", "rusqlite/bundled"]
 
 [dependencies]
@@ -29,6 +29,9 @@ ipc-channel = "0.21"
 toml = "0.8"
 dirs = "5"
 zarrs = { version = "0.23", features = ["filesystem"], optional = true }
+parquet = { version = "59.1.0", default-features = false, features = ["arrow", "zstd"], optional = true }
+arrow-array = { version = "59.1.0", optional = true }
+arrow-schema = { version = "59.1.0", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

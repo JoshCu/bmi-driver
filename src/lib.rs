@@ -19,7 +19,6 @@ pub use variables::units;
 
 // Public API re-exports
 pub use adapters::BmiC;
-#[cfg(feature = "fortran")]
 pub use adapters::BmiFortran;
 #[cfg(feature = "python")]
 pub use adapters::BmiPython;
@@ -28,11 +27,11 @@ pub use config::{
     parse_datetime, BmiAdapterType, DownsampleMode, ModuleConfig, OutputFormat, RealizationConfig,
     UpsampleMode,
 };
-pub use output::DivideDataStore;
 pub use error::{BmiError, BmiResult};
 pub use forcings::{Forcings, NetCdfForcings};
 pub use library::preload_dependencies;
+pub use output::DivideDataStore;
 pub use runner::{ModelInstance, ModelRunner, TimestepInfo, VarSource};
-pub use traits::{Bmi, BmiExt, BmiValue, VarType};
+pub use traits::{Bmi, BmiExt, BmiValue, VarInfo, VarType};
 
 pub type BmiModel = BmiC;

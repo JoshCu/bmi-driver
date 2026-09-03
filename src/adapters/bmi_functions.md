@@ -18,7 +18,7 @@ functions each adapter actually invokes on the underlying model.
 | `get_var_type` | ✓ | ✓ | ✓ |
 | `get_var_units` | ✓ | ✓ | ✓ |
 | `get_var_itemsize` | ✓ | ✓ | ✓ |
-| `get_var_nbytes` | ✓ (sizes get_value buffer) | ✓ (sizes get_value buffer) | — (Python manages memory) |
+| `get_var_nbytes` | ✓ (cached at init, sizes get_value buffer) | ✓ (cached at init, sizes get_value buffer) | — (Python manages memory) |
 | `get_var_location` | ✓ | ✓ | ✓ |
 | `get_current_time` | ✓ | ✓ | ✓ |
 | `get_start_time` | ✓ | ✓ | ✓ |
@@ -45,8 +45,10 @@ After a successful `initialize` call, all three adapters automatically call:
 1. `get_time_units` — to compute the internal `time_factor` used for unit conversion between
    model time and wall-clock seconds.
 2. `get_input_var_names` + `get_output_var_names` — via `cache_types()`, which then calls
-   `get_var_type` + `get_var_itemsize` for every variable — to populate a type cache that
-   avoids repeated FFI round-trips during the simulation loop.
+   `get_var_type` + `get_var_itemsize` + `get_var_nbytes` for every variable — to populate a
+   type cache (`VarInfo`) that avoids repeated FFI round-trips during the simulation loop.
+   `BmiC`/`BmiFortran` use the cached `nbytes` to size `get_value` buffers instead of calling
+   `get_var_nbytes` on every timestep.
 
 ## Functions in the C FFI struct not used by the driver
 
