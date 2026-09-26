@@ -259,42 +259,49 @@ fn test_zarr_roundtrip() {
 
 // --- Parquet ---
 
+/// Read a Parquet file, or a dataset directory of part files, in `LOCATIONS` order.
 #[cfg(feature = "parquet")]
 fn read_parquet_data(path: &Path) -> Vec<(String, Vec<(String, Vec<f64>)>)> {
-    use arrow_array::{Array, Float32Array, Int64Array, StringArray};
+    read_parquet_locations(path, LOCATIONS)
+}
+
+#[cfg(feature = "parquet")]
+fn read_parquet_locations(path: &Path, locations: &[&str]) -> Vec<(String, Vec<(String, Vec<f64>)>)> {
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     use std::collections::HashMap;
     use std::fs::File;
 
-    let file = File::open(path).unwrap();
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
-    let var_names: Vec<String> = builder
-        .schema()
-        .fields()
-        .iter()
-        .skip(3) // id, time_step, time
-        .map(|f| f.name().clone())
-        .collect();
-    let reader = builder.build().unwrap();
+    let files: Vec<std::path::PathBuf> = if path.is_dir() {
+        let mut parts: Vec<_> = std::fs::read_dir(path)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.extension().is_some_and(|e| e == "parquet"))
+            .collect();
+        parts.sort();
+        parts
+    } else {
+        vec![path.to_path_buf()]
+    };
 
+    let mut var_names: Option<Vec<String>> = None;
     // id -> (step -> [value per var])
     let mut rows: HashMap<String, Vec<(i64, Vec<f64>)>> = HashMap::new();
-    for batch in reader {
-        let batch = batch.unwrap();
-        let ids = batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
-        let steps = batch.column(1).as_any().downcast_ref::<Int64Array>().unwrap();
-        let var_cols: Vec<&Float32Array> = (0..var_names.len())
-            .map(|i| batch.column(3 + i).as_any().downcast_ref::<Float32Array>().unwrap())
+    for file in files {
+        let builder = ParquetRecordBatchReaderBuilder::try_new(File::open(file).unwrap()).unwrap();
+        let names: Vec<String> = builder
+            .schema()
+            .fields()
+            .iter()
+            .skip(3) // id, time_step, time
+            .map(|f| f.name().clone())
             .collect();
-        for row in 0..batch.num_rows() {
-            let vals: Vec<f64> = var_cols.iter().map(|c| c.value(row) as f64).collect();
-            rows.entry(ids.value(row).to_string())
-                .or_default()
-                .push((steps.value(row), vals));
-        }
+        // Every part of a dataset must share one schema
+        assert_eq!(var_names.get_or_insert_with(|| names.clone()), &names, "part schemas differ");
+        read_parquet_rows(builder.build().unwrap(), names.len(), &mut rows);
     }
+    let var_names = var_names.unwrap();
 
-    LOCATIONS
+    locations
         .iter()
         .map(|loc_id| {
             let mut loc_rows = rows.remove(*loc_id).unwrap();
@@ -313,6 +320,29 @@ fn read_parquet_data(path: &Path) -> Vec<(String, Vec<(String, Vec<f64>)>)> {
 }
 
 #[cfg(feature = "parquet")]
+fn read_parquet_rows(
+    reader: parquet::arrow::arrow_reader::ParquetRecordBatchReader,
+    n_vars: usize,
+    rows: &mut std::collections::HashMap<String, Vec<(i64, Vec<f64>)>>,
+) {
+    use arrow_array::{Array, Float32Array, Int64Array, StringArray};
+    for batch in reader {
+        let batch = batch.unwrap();
+        let ids = batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+        let steps = batch.column(1).as_any().downcast_ref::<Int64Array>().unwrap();
+        let var_cols: Vec<&Float32Array> = (0..n_vars)
+            .map(|i| batch.column(3 + i).as_any().downcast_ref::<Float32Array>().unwrap())
+            .collect();
+        for row in 0..batch.num_rows() {
+            let vals: Vec<f64> = var_cols.iter().map(|c| c.value(row) as f64).collect();
+            rows.entry(ids.value(row).to_string())
+                .or_default()
+                .push((steps.value(row), vals));
+        }
+    }
+}
+
+#[cfg(feature = "parquet")]
 #[test]
 fn test_parquet_roundtrip() {
     let dir = tempfile::tempdir().unwrap();
@@ -324,6 +354,7 @@ fn test_parquet_roundtrip() {
         parquet_path.clone(),
         start_epoch,
         INTERVAL,
+        VAR_NAMES.iter().map(|s| s.to_string()).collect(),
     )
     .unwrap();
     write_all(&mut store, &data);
@@ -344,6 +375,107 @@ fn test_parquet_roundtrip() {
                     "Parquet value mismatch at step {} for {}: {} vs {}",
                     i, orig_col.0, o, r
                 );
+            }
+        }
+    }
+}
+
+/// Variables shorter than the first column, or missing, must be NaN-filled
+/// rather than panic, and a location whose columns come in a different order
+/// must still land in the schema given up front.
+#[cfg(feature = "parquet")]
+#[test]
+fn test_parquet_short_and_missing_columns() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test.parquet");
+    let var_names: Vec<String> = VAR_NAMES.iter().map(|s| s.to_string()).collect();
+
+    let mut store =
+        bmi_driver::output::parquet::ParquetWriter::new(path.clone(), 1262304000, INTERVAL, var_names.clone())
+            .unwrap();
+    // cat-100: EVAPOTRANS is shorter than Q_OUT (the first column); RAIN_RATE is missing.
+    // cat-200: columns in a different order, with RAIN_RATE longest.
+    let data = vec![
+        (
+            "cat-100".to_string(),
+            vec![
+                ("Q_OUT".to_string(), vec![1.0, 2.0, 3.0]),
+                ("EVAPOTRANS".to_string(), vec![10.0]),
+            ],
+        ),
+        (
+            "cat-200".to_string(),
+            vec![
+                ("RAIN_RATE".to_string(), vec![7.0, 8.0, 9.0, 10.0]),
+                ("Q_OUT".to_string(), vec![4.0, 5.0]),
+                ("EVAPOTRANS".to_string(), vec![6.0, 6.5]),
+            ],
+        ),
+    ];
+    write_all(&mut store, &data);
+
+    let read = read_parquet_data(&path);
+    let nan = f64::NAN;
+    let expected: [[&[f64]; 3]; 2] = [
+        [&[1.0, 2.0, 3.0], &[10.0, nan, nan], &[nan, nan, nan]],
+        [&[4.0, 5.0, nan, nan], &[6.0, 6.5, nan, nan], &[7.0, 8.0, 9.0, 10.0]],
+    ];
+    for (loc, (_, columns)) in read.iter().enumerate() {
+        for (v, (name, vals)) in columns.iter().enumerate() {
+            assert_eq!(name, &var_names[v]);
+            let want = expected[loc][v];
+            assert_eq!(vals.len(), want.len(), "loc {loc} {name}");
+            for (got, want) in vals.iter().zip(want) {
+                assert!(
+                    (got.is_nan() && want.is_nan()) || got == want,
+                    "loc {loc} {name}: {vals:?} vs {want:?}"
+                );
+            }
+        }
+    }
+}
+
+/// Workers write parts of one dataset directory, with no merge step.
+#[cfg(feature = "parquet")]
+#[test]
+fn test_parquet_dataset_parts() {
+    let dir = tempfile::tempdir().unwrap();
+    let dataset = dir.path().join("results.parquet");
+    std::fs::create_dir_all(&dataset).unwrap();
+    let data = generate_data();
+    let var_names: Vec<String> = VAR_NAMES.iter().map(|s| s.to_string()).collect();
+
+    let handles: Vec<_> = data
+        .iter()
+        .enumerate()
+        .map(|(worker, loc)| {
+            let path = dataset.join(format!("part-{worker:05}.parquet"));
+            // Reverse the column order so the schema can't come from the first result.
+            let mut columns = loc.1.clone();
+            columns.reverse();
+            let work = vec![(loc.0.clone(), columns)];
+            let var_names = var_names.clone();
+            std::thread::spawn(move || {
+                let mut store =
+                    bmi_driver::output::parquet::ParquetWriter::new(path, 1262304000, INTERVAL, var_names)
+                        .unwrap();
+                write_all(&mut store, &work);
+            })
+        })
+        .collect();
+    for h in handles {
+        h.join().unwrap();
+    }
+
+    let read = read_parquet_data(&dataset);
+    assert_eq!(read.len(), data.len());
+    for (orig, read) in data.iter().zip(&read) {
+        assert_eq!(orig.0, read.0);
+        for (o, r) in orig.1.iter().zip(&read.1) {
+            assert_eq!(o.0, r.0);
+            assert_eq!(o.1.len(), r.1.len());
+            for (a, b) in o.1.iter().zip(&r.1) {
+                assert!((a - b).abs() < 1e-2);
             }
         }
     }
@@ -397,6 +529,7 @@ fn test_all_formats_equivalent() {
         parquet_path.clone(),
         start_epoch,
         INTERVAL,
+        VAR_NAMES.iter().map(|s| s.to_string()).collect(),
     )
     .unwrap();
     write_all(&mut parquet_store, &data);

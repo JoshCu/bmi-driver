@@ -45,6 +45,10 @@ struct WorkerConfig {
     realization: PathBuf,
     locations: Vec<String>,
     global_start: usize,
+    worker_index: usize,
+    /// Output variables discovered by the parent, so every worker writes the
+    /// same set of columns in the same order.
+    output_vars: Vec<String>,
 }
 
 fn load_toml_config() -> TomlConfig {
@@ -212,7 +216,6 @@ fn run_parent(
     // Check for missing mappings and print active unit conversions
     let output_format;
     let output_path;
-    #[cfg(feature = "zarr")]
     let mut discovered_vars: Vec<String> = Vec::new();
     {
         let mut runner = ModelRunner::from_config(realization)?;
@@ -222,8 +225,8 @@ fn run_parent(
         if let Some(loc) = locations.first() {
             runner.initialize(loc)?;
 
-            // Discover output variable names for zarr (needs to create arrays upfront)
-            #[cfg(feature = "zarr")]
+            // Discover output variable names, so every worker writes the same
+            // columns (zarr also needs them to create arrays upfront)
             {
                 if let Some(vars) = resolve_output_vars(&runner.config) {
                     discovered_vars = vars;
@@ -294,6 +297,26 @@ fn run_parent(
     let exe = env::current_exe().unwrap();
 
     fs::create_dir_all(&output_path).unwrap();
+
+    // For parquet: workers each write one part into a dataset directory.
+    // Clear any previous output first, so stale parts don't join the dataset.
+    #[cfg(feature = "parquet")]
+    if output_format == OutputFormat::Parquet {
+        let dataset = output_path.join("results.parquet");
+        let removed = if dataset.is_dir() {
+            fs::remove_dir_all(&dataset)
+        } else if dataset.exists() {
+            fs::remove_file(&dataset)
+        } else {
+            Ok(())
+        };
+        removed
+            .and_then(|_| fs::create_dir_all(&dataset))
+            .map_err(|e| BmiError::FunctionFailed {
+                model: "runner".into(),
+                func: format!("Failed to prepare {}: {}", dataset.display(), e),
+            })?;
+    }
 
     // For zarr: create the store before spawning workers so they can write directly
     #[cfg(feature = "zarr")]
@@ -380,6 +403,8 @@ fn run_parent(
             realization: realization.clone(),
             locations: locations[start..end].to_vec(),
             global_start: start,
+            worker_index: i,
+            output_vars: discovered_vars.clone(),
         };
 
         let worker_pb = worker_style.as_ref().map(|style| {
@@ -499,26 +524,6 @@ fn run_parent(
         }
     }
 
-    // Merge per-worker Parquet files into a single output file
-    #[cfg(feature = "parquet")]
-    if output_format == OutputFormat::Parquet {
-        let mut worker_files = Vec::new();
-        for i in 0..n_workers {
-            let start = i * chunk_size;
-            if start >= n_locations {
-                break;
-            }
-            let first_loc = &locations[start];
-            let tmp_path = output_path.join(format!("tmp_{}.parquet", first_loc));
-            if tmp_path.exists() {
-                worker_files.push(tmp_path);
-            }
-        }
-        if !worker_files.is_empty() {
-            let final_path = output_path.join("results.parquet");
-            bmi_driver::output::parquet::merge_parquet_files(&worker_files, &final_path)?;
-        }
-    }
     Ok(())
 }
 
@@ -637,8 +642,7 @@ fn run_worker(data_dir: &PathBuf, ipc_server_name: &str) -> Result<(), BmiError>
         &runner,
         start_epoch,
         interval,
-        config.global_start,
-        config.locations.first().map(|s| s.as_str()),
+        &config,
     )?;
 
     let report_interval = ((config.locations.len() as f64) * 0.01).ceil().max(1.0) as usize;
@@ -690,8 +694,7 @@ fn create_output_store(
     runner: &ModelRunner,
     start_epoch: i64,
     interval: i64,
-    #[cfg_attr(not(feature = "zarr"), allow(unused))] global_start: usize,
-    first_location: Option<&str>,
+    worker: &WorkerConfig,
 ) -> Result<Box<dyn DivideDataStore>, BmiError> {
     match format {
         OutputFormat::Csv => Ok(Box::new(bmi_driver::output::csv::CsvStore::new(
@@ -700,7 +703,7 @@ fn create_output_store(
             interval,
         ))),
         OutputFormat::Netcdf => {
-            let first_loc = first_location.unwrap_or("output");
+            let first_loc = worker.locations.first().map_or("output", |s| s.as_str());
             let nc_path = output_path.join(format!("tmp_{}.nc", first_loc));
             let start_time = &runner.config.time.start_time;
             let end_epoch = bmi_driver::parse_datetime(&runner.config.time.end_time)?;
@@ -717,17 +720,19 @@ fn create_output_store(
             let zarr_path = output_path.join("results.zarr");
             Ok(Box::new(bmi_driver::output::zarr::ZarrStore::new(
                 zarr_path,
-                global_start,
+                worker.global_start,
             )))
         }
         #[cfg(feature = "parquet")]
         OutputFormat::Parquet => {
-            let first_loc = first_location.unwrap_or("output");
-            let parquet_path = output_path.join(format!("tmp_{}.parquet", first_loc));
+            let parquet_path = output_path
+                .join("results.parquet")
+                .join(format!("part-{:05}.parquet", worker.worker_index));
             Ok(Box::new(bmi_driver::output::parquet::ParquetWriter::new(
                 parquet_path,
                 start_epoch,
                 interval,
+                worker.output_vars.clone(),
             )?))
         }
     }

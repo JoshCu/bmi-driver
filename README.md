@@ -95,7 +95,7 @@ Output format is set via `output_format` in the config (`"csv"`, `"netcdf"`, `"z
 - **CSV**: One file per location at `outputs/bmi-driver/<location_id>.csv`
 - **NetCDF**: Single `outputs/bmi-driver/results.nc` with dimensions `[id, time]`
 - **Zarr**: Single `outputs/bmi-driver/results.zarr` store with chunking `[1, n_times]` per variable
-- **Parquet**: Single `outputs/bmi-driver/results.parquet`, long format with one row per `(id, time)` and columns `id`, `time_step`, `time`, then one column per output variable
+- **Parquet**: Parquet dataset directory `outputs/bmi-driver/results.parquet/` with one `part-<worker>.parquet` per worker (pandas, polars, pyarrow, DuckDB and Spark read the directory as one table, e.g. `pd.read_parquet("results.parquet")`). Long format with one row per `(id, time)` and columns `id`, `time_step`, `time`, then one column per output variable; every part has the same schema
 
 ## Documentation
 
