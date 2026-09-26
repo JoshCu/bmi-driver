@@ -142,6 +142,7 @@ fn test_netcdf_roundtrip() {
         START_TIME,
         INTERVAL,
         N_STEPS - 1, // total_steps = N_STEPS - 1 because n_times = total_steps + 1
+        LOCATIONS.len(),
     )
     .unwrap();
     write_all(&mut store, &data);
@@ -162,6 +163,50 @@ fn test_netcdf_roundtrip() {
                     "NetCDF value mismatch at step {} for {}: {} vs {}",
                     i, orig_col.0, o, r
                 );
+            }
+        }
+    }
+}
+
+#[test]
+fn test_netcdf_merge() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = generate_data();
+
+    // One worker file per location, then merge into a single file
+    let worker_files: Vec<_> = data
+        .iter()
+        .map(|loc| {
+            let path = dir.path().join(format!("tmp_{}.nc", loc.0));
+            let mut store = bmi_driver::output::netcdf::NetCdfWriter::new(
+                path.clone(),
+                START_TIME,
+                INTERVAL,
+                N_STEPS - 1,
+                1,
+            )
+            .unwrap();
+            write_all(&mut store, std::slice::from_ref(loc));
+            path
+        })
+        .collect();
+
+    let merged_path = dir.path().join("results.nc");
+    bmi_driver::output::netcdf::merge_netcdf_files(&worker_files, &merged_path).unwrap();
+    assert!(worker_files.iter().all(|p| !p.exists()), "worker files not removed");
+
+    let file = netcdf::open(&merged_path).unwrap();
+    assert!(!file.dimension("id").unwrap().is_unlimited(), "id dimension should be fixed-size");
+    drop(file);
+
+    let read_back = read_netcdf_data(&merged_path);
+    assert_eq!(read_back.len(), data.len());
+    for (orig, read) in data.iter().zip(read_back.iter()) {
+        assert_eq!(orig.0, read.0, "location ID mismatch");
+        for (orig_col, read_col) in orig.1.iter().zip(read.1.iter()) {
+            assert_eq!(orig_col.0, read_col.0, "variable name mismatch");
+            for (o, r) in orig_col.1.iter().zip(read_col.1.iter()) {
+                assert!((o - r).abs() < 1e-2, "{}: {} vs {}", orig_col.0, o, r);
             }
         }
     }
@@ -371,6 +416,7 @@ fn test_all_formats_equivalent() {
         START_TIME,
         INTERVAL,
         N_STEPS - 1,
+        LOCATIONS.len(),
     )
     .unwrap();
     write_all(&mut nc_store, &data);

@@ -639,6 +639,7 @@ fn run_worker(data_dir: &PathBuf, ipc_server_name: &str) -> Result<(), BmiError>
         interval,
         config.global_start,
         config.locations.first().map(|s| s.as_str()),
+        config.locations.len(),
     )?;
 
     let report_interval = ((config.locations.len() as f64) * 0.01).ceil().max(1.0) as usize;
@@ -692,6 +693,7 @@ fn create_output_store(
     interval: i64,
     #[cfg_attr(not(feature = "zarr"), allow(unused))] global_start: usize,
     first_location: Option<&str>,
+    n_locations: usize,
 ) -> Result<Box<dyn DivideDataStore>, BmiError> {
     match format {
         OutputFormat::Csv => Ok(Box::new(bmi_driver::output::csv::CsvStore::new(
@@ -710,6 +712,7 @@ fn create_output_store(
                 start_time,
                 interval,
                 total_steps,
+                n_locations,
             )?))
         }
         #[cfg(feature = "zarr")]
