@@ -127,7 +127,7 @@ The runner supports three output formats, all implementing the `DivideDataStore`
 |--------|------|----------|
 | **CSV** | `src/output/csv.rs` | One file per location at `<data_dir>/outputs/bmi-driver/<loc_id>.csv` with columns for time and each output variable |
 | **NetCDF** | `src/output/netcdf.rs` | Each worker writes a temporary `.nc` file; the parent merges them into `results.nc` |
-| **Zarr** | `src/output/zarr.rs` | Parent pre-creates the store with all dimensions; workers write slices in parallel |
+| **Zarr** | `src/output/zarr.rs` | Parent pre-creates the store with multi-location chunks and aligns worker blocks to them; each worker buffers a chunk's worth of locations on a background thread and writes whole chunks in parallel |
 
 ## Summary Diagram
 

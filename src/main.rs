@@ -289,7 +289,8 @@ fn run_parent(
             .unwrap_or(1)
     });
     let n_locations = locations.len();
-    let chunk_size = (n_locations + n_workers - 1) / n_workers;
+    #[cfg_attr(not(feature = "zarr"), allow(unused_mut))]
+    let mut chunk_size = (n_locations + n_workers - 1) / n_workers;
 
     let exe = env::current_exe().unwrap();
 
@@ -306,6 +307,11 @@ fn run_parent(
         let total_steps = ((end_epoch - start_epoch) / interval) as usize;
         let zarr_path = output_path.join("results.zarr");
 
+        // Round each worker's block up to whole chunks, so no two workers
+        // ever write the same chunk.
+        let chunk_locations = bmi_driver::output::zarr::chunk_locations(total_steps, chunk_size);
+        chunk_size = chunk_size.div_ceil(chunk_locations) * chunk_locations;
+
         bmi_driver::output::zarr::create_zarr_store(
             &zarr_path,
             start_time,
@@ -313,6 +319,7 @@ fn run_parent(
             total_steps,
             locations,
             &discovered_vars,
+            chunk_locations,
         )?;
     }
 
@@ -718,7 +725,7 @@ fn create_output_store(
             Ok(Box::new(bmi_driver::output::zarr::ZarrStore::new(
                 zarr_path,
                 global_start,
-            )))
+            )?))
         }
         #[cfg(feature = "parquet")]
         OutputFormat::Parquet => {
