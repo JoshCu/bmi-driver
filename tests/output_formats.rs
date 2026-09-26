@@ -179,33 +179,33 @@ fn read_zarr_data(path: &Path) -> Vec<(String, Vec<(String, Vec<f64>)>)> {
         Arc::new(FilesystemStore::new(path).unwrap());
 
     let id_array = zarrs::array::Array::open(store.clone(), "/id").unwrap();
-    let n_locs = id_array.shape()[0] as usize;
+    let loc_ids: Vec<String> = id_array
+        .retrieve_array_subset::<Vec<String>>(&id_array.subset_all())
+        .unwrap();
 
-    // Read location IDs
-    let loc_ids: Vec<String> = (0..n_locs)
-        .map(|i| {
-            let chunk: Vec<String> = id_array
-                .retrieve_chunk::<Vec<String>>(&[i as u64])
-                .unwrap();
-            chunk[0].clone()
+    let group = zarrs::group::Group::open(store.clone(), "/").unwrap();
+    let var_names: Vec<String> =
+        serde_json::from_value(group.attributes()["variables"].clone()).unwrap();
+
+    let arrays: Vec<_> = var_names
+        .iter()
+        .map(|name| {
+            let array = zarrs::array::Array::open(store.clone(), &format!("/{name}")).unwrap();
+            let n_times = array.shape()[1] as usize;
+            let vals: Vec<f32> = array.retrieve_array_subset::<Vec<f32>>(&array.subset_all()).unwrap();
+            (name.clone(), n_times, vals)
         })
         .collect();
-
-    let var_names: Vec<String> = VAR_NAMES.iter().map(|s| s.to_string()).collect();
 
     loc_ids
         .iter()
         .enumerate()
-        .map(|(loc_idx, loc_id): (usize, &String)| {
-            let columns: Vec<(String, Vec<f64>)> = var_names
+        .map(|(loc_idx, loc_id)| {
+            let columns: Vec<(String, Vec<f64>)> = arrays
                 .iter()
-                .map(|name| {
-                    let array = zarrs::array::Array::open(store.clone(), &format!("/{name}")).unwrap();
-                    let f32_vals: Vec<f32> = array
-                        .retrieve_chunk::<Vec<f32>>(&[loc_idx as u64, 0])
-                        .unwrap();
-                    let f64_vals: Vec<f64> = f32_vals.iter().map(|&v| v as f64).collect();
-                    (name.clone(), f64_vals)
+                .map(|(name, n_times, vals)| {
+                    let row = &vals[loc_idx * n_times..(loc_idx + 1) * n_times];
+                    (name.clone(), row.iter().map(|&v| v as f64).collect())
                 })
                 .collect();
             (loc_id.clone(), columns)
@@ -230,10 +230,11 @@ fn test_zarr_roundtrip() {
         N_STEPS - 1,
         &loc_ids,
         &var_names_owned,
+        bmi_driver::output::zarr::chunk_locations(N_STEPS - 1, LOCATIONS.len()),
     )
     .unwrap();
 
-    let mut store = bmi_driver::output::zarr::ZarrStore::new(zarr_path.clone(), 0);
+    let mut store = bmi_driver::output::zarr::ZarrStore::new(zarr_path.clone(), 0).unwrap();
     write_all(&mut store, &data);
 
     let read_back = read_zarr_data(&zarr_path);
@@ -255,6 +256,104 @@ fn test_zarr_roundtrip() {
             }
         }
     }
+}
+
+/// Several workers writing concurrently into one store, with a location count
+/// that is a multiple of neither the chunk height nor the worker count.
+#[cfg(feature = "zarr")]
+#[test]
+fn test_zarr_multi_worker_partial_chunks() {
+    let dir = tempfile::tempdir().unwrap();
+    let zarr_path = dir.path().join("test.zarr");
+
+    let n_locations: usize = 23;
+    let n_workers = 4;
+    let chunk_locations = 5;
+    let var_names: Vec<String> = VAR_NAMES.iter().map(|s| s.to_string()).collect();
+    let loc_ids: Vec<String> = (0..n_locations).map(|i| format!("cat-{i}")).collect();
+
+    // Same alignment as run_parent: round each worker's block up to whole chunks.
+    let per_worker = n_locations.div_ceil(n_workers);
+    let block = per_worker.div_ceil(chunk_locations) * chunk_locations;
+    assert_eq!(block, 10);
+
+    bmi_driver::output::zarr::create_zarr_store(
+        &zarr_path,
+        START_TIME,
+        INTERVAL,
+        N_STEPS - 1,
+        &loc_ids,
+        &var_names,
+        chunk_locations,
+    )
+    .unwrap();
+
+    let value = |loc: usize, var: usize, step: usize| (loc * 1000 + var * 100 + step) as f64;
+    // Location 7 has a short Q_OUT series; location 21 has no EVAPOTRANS at all.
+    let columns_for = |loc: usize| -> Vec<(String, Vec<f64>)> {
+        var_names
+            .iter()
+            .enumerate()
+            .filter(|(v, _)| !(loc == 21 && *v == 1))
+            .map(|(v, name)| {
+                let len = if loc == 7 && v == 0 { N_STEPS - 5 } else { N_STEPS };
+                (name.clone(), (0..len).map(|t| value(loc, v, t)).collect())
+            })
+            .collect()
+    };
+
+    let handles: Vec<_> = (0..n_locations)
+        .step_by(block)
+        .map(|start| {
+            let end = (start + block).min(n_locations);
+            let path = zarr_path.clone();
+            let work: Vec<_> = (start..end).map(|l| (loc_ids[l].clone(), columns_for(l))).collect();
+            std::thread::spawn(move || {
+                let mut store = bmi_driver::output::zarr::ZarrStore::new(path, start).unwrap();
+                write_all(&mut store, &work);
+            })
+        })
+        .collect();
+    assert_eq!(handles.len(), 3);
+    for h in handles {
+        h.join().unwrap();
+    }
+
+    let read_back = read_zarr_data(&zarr_path);
+    assert_eq!(read_back.len(), n_locations);
+    for (loc, (id, columns)) in read_back.iter().enumerate() {
+        assert_eq!(id, &loc_ids[loc]);
+        for (v, (name, vals)) in columns.iter().enumerate() {
+            assert_eq!(name, &var_names[v]);
+            assert_eq!(vals.len(), N_STEPS);
+            for (t, &got) in vals.iter().enumerate() {
+                let missing = (loc == 21 && v == 1) || (loc == 7 && v == 0 && t >= N_STEPS - 5);
+                if missing {
+                    assert!(got.is_nan(), "loc {loc} var {name} step {t}: expected NaN, got {got}");
+                } else {
+                    assert_eq!(got, value(loc, v, t), "loc {loc} var {name} step {t}");
+                }
+            }
+        }
+    }
+
+    // One file per chunk of locations, not one per location.
+    for name in &var_names {
+        let chunk_dir = zarr_path.join(name).join("c");
+        let n_files = walk_files(&chunk_dir);
+        assert_eq!(n_files, n_locations.div_ceil(chunk_locations), "chunk files for {name}");
+    }
+}
+
+#[cfg(feature = "zarr")]
+fn walk_files(dir: &Path) -> usize {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| {
+            let path = e.unwrap().path();
+            if path.is_dir() { walk_files(&path) } else { 1 }
+        })
+        .sum()
 }
 
 // --- Parquet ---
@@ -386,9 +485,10 @@ fn test_all_formats_equivalent() {
         N_STEPS - 1,
         &loc_ids,
         &var_names_owned,
+        1,
     )
     .unwrap();
-    let mut zarr_store = bmi_driver::output::zarr::ZarrStore::new(zarr_path.clone(), 0);
+    let mut zarr_store = bmi_driver::output::zarr::ZarrStore::new(zarr_path.clone(), 0).unwrap();
     write_all(&mut zarr_store, &data);
 
     // Write Parquet

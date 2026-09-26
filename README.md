@@ -94,7 +94,7 @@ Output format is set via `output_format` in the config (`"csv"`, `"netcdf"`, `"z
 
 - **CSV**: One file per location at `outputs/bmi-driver/<location_id>.csv`
 - **NetCDF**: Single `outputs/bmi-driver/results.nc` with dimensions `[id, time]`
-- **Zarr**: Single `outputs/bmi-driver/results.zarr` store with chunking `[1, n_times]` per variable
+- **Zarr**: Single `outputs/bmi-driver/results.zarr` store. Each variable is chunked `[B, n_times]` and zstd compressed, where `B` (up to 1024 locations, about 8 MB per chunk) is picked from the run length; each worker's block of locations is aligned to `B`, so workers write whole chunks in parallel without locking
 - **Parquet**: Single `outputs/bmi-driver/results.parquet`, long format with one row per `(id, time)` and columns `id`, `time_step`, `time`, then one column per output variable
 
 ## Documentation
