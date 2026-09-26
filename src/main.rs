@@ -212,7 +212,6 @@ fn run_parent(
     // Check for missing mappings and print active unit conversions
     let output_format;
     let output_path;
-    #[cfg(feature = "zarr")]
     let mut discovered_vars: Vec<String> = Vec::new();
     {
         let mut runner = ModelRunner::from_config(realization)?;
@@ -222,8 +221,7 @@ fn run_parent(
         if let Some(loc) = locations.first() {
             runner.initialize(loc)?;
 
-            // Discover output variable names for zarr (needs to create arrays upfront)
-            #[cfg(feature = "zarr")]
+            // Discover output variable names (zarr and netcdf create arrays upfront)
             {
                 if let Some(vars) = resolve_output_vars(&runner.config) {
                     discovered_vars = vars;
@@ -295,25 +293,39 @@ fn run_parent(
 
     fs::create_dir_all(&output_path).unwrap();
 
-    // For zarr: create the store before spawning workers so they can write directly
+    // For zarr and netcdf: create the store before spawning workers so they can
+    // all write directly into it
+    let presized = output_format == OutputFormat::Netcdf;
     #[cfg(feature = "zarr")]
-    if output_format == OutputFormat::Zarr {
+    let presized = presized || output_format == OutputFormat::Zarr;
+    if presized {
         let runner_tmp = ModelRunner::from_config(realization)?;
         let start_time = &runner_tmp.config.time.start_time;
         let interval = runner_tmp.config.time.output_interval;
         let start_epoch = bmi_driver::parse_datetime(start_time)?;
         let end_epoch = bmi_driver::parse_datetime(&runner_tmp.config.time.end_time)?;
         let total_steps = ((end_epoch - start_epoch) / interval) as usize;
-        let zarr_path = output_path.join("results.zarr");
 
-        bmi_driver::output::zarr::create_zarr_store(
-            &zarr_path,
-            start_time,
-            interval,
-            total_steps,
-            locations,
-            &discovered_vars,
-        )?;
+        match output_format {
+            #[cfg(feature = "zarr")]
+            OutputFormat::Zarr => bmi_driver::output::zarr::create_zarr_store(
+                &output_path.join("results.zarr"),
+                start_time,
+                interval,
+                total_steps,
+                locations,
+                &discovered_vars,
+            )?,
+            OutputFormat::Netcdf => bmi_driver::output::netcdf::create_netcdf_store(
+                &output_path.join("results.nc"),
+                start_time,
+                interval,
+                total_steps,
+                locations,
+                &discovered_vars,
+            )?,
+            _ => {}
+        }
     }
 
     let mp = MultiProgress::new();
@@ -479,26 +491,6 @@ fn run_parent(
         pb.finish_with_message("done ✓");
     }
 
-    // Merge per-worker NetCDF files into a single output file
-    if output_format == OutputFormat::Netcdf {
-        let mut worker_files = Vec::new();
-        for i in 0..n_workers {
-            let start = i * chunk_size;
-            if start >= n_locations {
-                break;
-            }
-            let first_loc = &locations[start];
-            let tmp_path = output_path.join(format!("tmp_{}.nc", first_loc));
-            if tmp_path.exists() {
-                worker_files.push(tmp_path);
-            }
-        }
-        if !worker_files.is_empty() {
-            let final_path = output_path.join("results.nc");
-            bmi_driver::output::netcdf::merge_netcdf_files(&worker_files, &final_path)?;
-        }
-    }
-
     // Merge per-worker Parquet files into a single output file
     #[cfg(feature = "parquet")]
     if output_format == OutputFormat::Parquet {
@@ -634,12 +626,10 @@ fn run_worker(data_dir: &PathBuf, ipc_server_name: &str) -> Result<(), BmiError>
     let mut store = create_output_store(
         output_format,
         &output_path,
-        &runner,
         start_epoch,
         interval,
         config.global_start,
         config.locations.first().map(|s| s.as_str()),
-        config.locations.len(),
     )?;
 
     let report_interval = ((config.locations.len() as f64) * 0.01).ceil().max(1.0) as usize;
@@ -688,12 +678,10 @@ fn collect_columns(
 fn create_output_store(
     format: OutputFormat,
     output_path: &PathBuf,
-    runner: &ModelRunner,
     start_epoch: i64,
     interval: i64,
-    #[cfg_attr(not(feature = "zarr"), allow(unused))] global_start: usize,
-    first_location: Option<&str>,
-    n_locations: usize,
+    global_start: usize,
+    #[cfg_attr(not(feature = "parquet"), allow(unused))] first_location: Option<&str>,
 ) -> Result<Box<dyn DivideDataStore>, BmiError> {
     match format {
         OutputFormat::Csv => Ok(Box::new(bmi_driver::output::csv::CsvStore::new(
@@ -701,20 +689,10 @@ fn create_output_store(
             start_epoch,
             interval,
         ))),
-        OutputFormat::Netcdf => {
-            let first_loc = first_location.unwrap_or("output");
-            let nc_path = output_path.join(format!("tmp_{}.nc", first_loc));
-            let start_time = &runner.config.time.start_time;
-            let end_epoch = bmi_driver::parse_datetime(&runner.config.time.end_time)?;
-            let total_steps = ((end_epoch - start_epoch) / interval) as usize;
-            Ok(Box::new(bmi_driver::output::netcdf::NetCdfWriter::new(
-                nc_path,
-                start_time,
-                interval,
-                total_steps,
-                n_locations,
-            )?))
-        }
+        OutputFormat::Netcdf => Ok(Box::new(bmi_driver::output::netcdf::NetCdfWriter::new(
+            output_path.join("results.nc"),
+            global_start,
+        )?)),
         #[cfg(feature = "zarr")]
         OutputFormat::Zarr => {
             let zarr_path = output_path.join("results.zarr");
