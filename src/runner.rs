@@ -16,6 +16,7 @@ use crate::forcings::{Forcings, NetCdfForcings};
 use crate::resample;
 use crate::traits::{Bmi, BmiExt};
 use crate::units::UnitConversion;
+use crate::variables::binding::VarBinding;
 
 #[derive(Debug, Clone)]
 pub struct TimestepInfo {
@@ -33,6 +34,10 @@ pub struct ModelInstance {
     pub timestep_info: TimestepInfo,
     pub downsample_mode: DownsampleMode,
     pub upsample_mode: UpsampleMode,
+    /// Allow coupling through `get_value_ptr` (see [`ModuleParams::use_value_ptr`]).
+    ///
+    /// [`ModuleParams::use_value_ptr`]: crate::config::ModuleParams::use_value_ptr
+    pub use_value_ptr: bool,
 }
 
 /// A suggested variable mapping that could be added to the realization config.
@@ -196,6 +201,7 @@ impl ModelRunner {
             timestep_info,
             downsample_mode: module.params.downsample_mode,
             upsample_mode: module.params.upsample_mode,
+            use_value_ptr: module.params.use_value_ptr,
         });
         Ok(())
     }
@@ -412,19 +418,31 @@ impl ModelRunner {
         let model_steps = model_ts.num_steps;
         let downsample_mode = self.models[idx].downsample_mode;
         let upsample_mode = self.models[idx].upsample_mode;
+        let use_ptr = self.models[idx].use_value_ptr;
 
-        let mut outs: HashMap<String, Vec<f64>> = output_names
-            .iter()
-            .map(|n| (n.clone(), Vec::with_capacity(model_steps + 1)))
+        // Resolve every coupled variable once so the loop below does no lookups or allocation.
+        let mut inputs = Vec::new();
+        for (model_input, source) in self.models[idx].input_map.clone() {
+            let conv = self.models[idx]
+                .input_conversions
+                .get(&model_input)
+                .cloned();
+            let var = VarBinding::new(self.models[idx].model.as_mut(), &model_input, use_ptr)?;
+            inputs.push((source, conv, var));
+        }
+        // Outputs that can't be bound (unknown type) are left empty, as failed reads always were.
+        let mut outs: Vec<(String, Option<VarBinding>, Vec<f64>)> = output_names
+            .into_iter()
+            .map(|name| {
+                let var = VarBinding::new(self.models[idx].model.as_mut(), &name, use_ptr).ok();
+                (name, var, Vec::with_capacity(model_steps + 1))
+            })
             .collect();
-
-        let input_map = self.models[idx].input_map.clone();
-        let conversions = self.models[idx].input_conversions.clone();
 
         for step in 0..model_steps + 1 {
             let dest_time = step as f64 * model_ts.dt_seconds;
 
-            for (model_input, source) in &input_map {
+            for (source, conv, var) in &mut inputs {
                 let val = self.get_var_resampled(
                     source,
                     dest_time,
@@ -432,24 +450,33 @@ impl ModelRunner {
                     downsample_mode,
                     upsample_mode,
                 )?;
-                let val = if let Some(conv) = conversions.get(model_input) {
-                    conv.convert(val)
-                } else {
-                    val
-                };
-                self.models[idx].model.set_value(model_input, &[val])?;
+                let val = conv.as_ref().map_or(val, |c| c.convert(val));
+                var.set(self.models[idx].model.as_mut(), val)?;
             }
 
-            self.models[idx].model.update()?;
+            let model = self.models[idx].model.as_mut();
+            model.update()?;
 
-            for name in &output_names {
-                if let Ok(v) = self.models[idx].model.get_scalar(name) {
-                    outs.get_mut(name).unwrap().push(v);
+            let bound_outs = outs.iter_mut().filter_map(|(_, var, _)| var.as_mut());
+            for var in inputs.iter_mut().map(|(_, _, var)| var).chain(bound_outs) {
+                var.recheck_ptr(model);
+            }
+
+            for (_, var, vals) in &mut outs {
+                if let Some(var) = var {
+                    if let Ok(v) = var.get(model) {
+                        vals.push(v);
+                    }
                 }
+            }
+
+            let bound_outs = outs.iter_mut().filter_map(|(_, var, _)| var.as_mut());
+            for var in inputs.iter_mut().map(|(_, _, var)| var).chain(bound_outs) {
+                var.promote();
             }
         }
 
-        for (name, vals) in outs {
+        for (name, _, vals) in outs {
             self.outputs.insert(name, vals);
         }
         Ok(())

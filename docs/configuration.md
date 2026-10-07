@@ -34,6 +34,7 @@ The config file is `<data_dir>/config/realization.json`. The format is compatibl
 | `params.variables_names_map` | no | Maps model input names to source variable names (from forcings or upstream models) |
 | `params.model_params` | no | Key-value parameters set on the model after initialization via `set_value()` |
 | `params.python_type` | no | Python class path for the Python adapter (e.g., `"lstm.bmi_lstm.bmi_LSTM"`) |
+| `params.use_value_ptr` | no | Default `true`. Couple variables by reading/writing the model's memory via `get_value_ptr` (checked against `get_value`/`set_value` on the first timestep). Set `false` if the model's `set_value`/`get_value` do more than copy memory. |
 
 ## Library usage
 

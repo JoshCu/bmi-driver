@@ -1,12 +1,14 @@
 use std::collections::HashMap;
+use std::ffi::CStr;
 use std::os::raw::{c_char, c_void};
 use std::path::Path;
+use std::ptr::NonNull;
 
 use super::{check_initialized, cstr_to_string, impl_bmi_drop, to_cstring, verify_config_path};
 use crate::error::{function_failed, not_implemented, BmiError, BmiResult};
 use crate::ffi::{Bmi as BmiStruct, BMI_MAX_NAME, BMI_SUCCESS};
 use crate::library::GlobalLibrary;
-use crate::traits::{parse_time_units, Bmi, VarInfo};
+use crate::traits::{parse_time_units, Bmi, BmiValue, VarInfo};
 
 /// BMI adapter for C shared libraries.
 ///
@@ -29,6 +31,10 @@ use crate::traits::{parse_time_units, Bmi, VarInfo};
 /// - `set_value` — push input values via a type-erased `*mut c_void`; same single pointer for
 ///   all three Rust typed variants.
 ///
+/// The runner prefers `get_value_ptr` over both: it asks for each coupled variable's pointer once,
+/// checks it against `set_value`/`get_value` on the first timestep, then reads and writes the
+/// model's memory directly. Variables the model doesn't expose this way stay on the calls above.
+///
 /// **After `initialize`** (setup, not repeated per timestep):
 /// - `get_time_units` — used to compute the internal `time_factor`.
 /// - `get_input_var_names` / `get_output_var_names` (preceded by `get_input_item_count` /
@@ -44,7 +50,7 @@ use crate::traits::{parse_time_units, Bmi, VarInfo};
 ///
 /// ## Functions NOT called
 ///
-/// The C FFI struct contains optional pointers for `get_value_ptr`, `get_value_at_indices`,
+/// The C FFI struct contains optional pointers for `get_value_at_indices`,
 /// `set_value_at_indices`, and all extended grid functions (`get_grid_shape`, `get_grid_x`, …).
 /// None of these are wrapped by the Rust [`crate::traits::Bmi`] trait so the driver never calls
 /// them, but they may be populated by the model library.
@@ -181,6 +187,43 @@ impl BmiC {
             return Err(function_failed(&self.name, func_name));
         }
         bufs.iter().map(|b| cstr_to_string(b)).collect()
+    }
+
+    /// Element count for a `get_value` buffer, from the cached `nbytes` when available.
+    fn value_count(&self, name: &str, itemsize: usize) -> BmiResult<usize> {
+        let nbytes = match self.cached_nbytes(name) {
+            Some(n) => n,
+            None => self.get_var_nbytes(name)?,
+        };
+        Ok(nbytes as usize / itemsize)
+    }
+
+    /// # Safety
+    /// `dest` must be valid for writes of the variable's `nbytes`.
+    unsafe fn get_value_raw(&self, name: &CStr, dest: *mut c_void) -> BmiResult<()> {
+        check_initialized(self.initialized, &self.name)?;
+        let func = self
+            .bmi
+            .get_value
+            .ok_or_else(|| not_implemented(&self.name, "get_value"))?;
+        if func(self.ptr(), name.as_ptr(), dest) != BMI_SUCCESS {
+            return Err(function_failed(&self.name, "get_value"));
+        }
+        Ok(())
+    }
+
+    /// # Safety
+    /// `src` must be valid for reads of the variable's `nbytes`.
+    unsafe fn set_value_raw(&mut self, name: &CStr, src: *mut c_void) -> BmiResult<()> {
+        check_initialized(self.initialized, &self.name)?;
+        let func = self
+            .bmi
+            .set_value
+            .ok_or_else(|| not_implemented(&self.name, "set_value"))?;
+        if func(self.bmi.as_mut(), name.as_ptr(), src) != BMI_SUCCESS {
+            return Err(function_failed(&self.name, "set_value"));
+        }
+        Ok(())
     }
 }
 
@@ -348,131 +391,55 @@ impl Bmi for BmiC {
         self.call_double("get_time_step", || self.bmi.get_time_step)
     }
 
-    // TODO: get_value_f64/f32/i32 and set_value_f64/f32/i32 could use a generic helper
-    // to reduce duplication across the three typed variants. Deferred because the unsafe
-    // FFI calls need careful attention.
-
     fn get_value_f64(&self, name: &str) -> BmiResult<Vec<f64>> {
-        check_initialized(self.initialized, &self.name)?;
-        let func = self
-            .bmi
-            .get_value
-            .ok_or_else(|| not_implemented(&self.name, "get_value"))?;
-        let nbytes = match self.cached_nbytes(name) {
-            Some(n) => n,
-            None => self.get_var_nbytes(name)?,
-        };
-        let count = nbytes as usize / std::mem::size_of::<f64>();
-        let mut vals = vec![0.0f64; count];
-        let cname = to_cstring(name)?;
-        if unsafe { func(self.ptr(), cname.as_ptr(), vals.as_mut_ptr() as *mut c_void) }
-            != BMI_SUCCESS
-        {
-            return Err(function_failed(&self.name, "get_value"));
-        }
+        let mut vals = vec![0.0f64; self.value_count(name, std::mem::size_of::<f64>())?];
+        unsafe { self.get_value_raw(&to_cstring(name)?, vals.as_mut_ptr() as *mut c_void)? };
         Ok(vals)
     }
 
     fn get_value_f32(&self, name: &str) -> BmiResult<Vec<f32>> {
-        check_initialized(self.initialized, &self.name)?;
-        let func = self
-            .bmi
-            .get_value
-            .ok_or_else(|| not_implemented(&self.name, "get_value"))?;
-        let nbytes = match self.cached_nbytes(name) {
-            Some(n) => n,
-            None => self.get_var_nbytes(name)?,
-        };
-        let count = nbytes as usize / std::mem::size_of::<f32>();
-        let mut vals = vec![0.0f32; count];
-        let cname = to_cstring(name)?;
-        if unsafe { func(self.ptr(), cname.as_ptr(), vals.as_mut_ptr() as *mut c_void) }
-            != BMI_SUCCESS
-        {
-            return Err(function_failed(&self.name, "get_value"));
-        }
+        let mut vals = vec![0.0f32; self.value_count(name, std::mem::size_of::<f32>())?];
+        unsafe { self.get_value_raw(&to_cstring(name)?, vals.as_mut_ptr() as *mut c_void)? };
         Ok(vals)
     }
 
     fn get_value_i32(&self, name: &str) -> BmiResult<Vec<i32>> {
-        check_initialized(self.initialized, &self.name)?;
-        let func = self
-            .bmi
-            .get_value
-            .ok_or_else(|| not_implemented(&self.name, "get_value"))?;
-        let nbytes = match self.cached_nbytes(name) {
-            Some(n) => n,
-            None => self.get_var_nbytes(name)?,
-        };
-        let count = nbytes as usize / std::mem::size_of::<i32>();
-        let mut vals = vec![0i32; count];
-        let cname = to_cstring(name)?;
-        if unsafe { func(self.ptr(), cname.as_ptr(), vals.as_mut_ptr() as *mut c_void) }
-            != BMI_SUCCESS
-        {
-            return Err(function_failed(&self.name, "get_value"));
-        }
+        let mut vals = vec![0i32; self.value_count(name, std::mem::size_of::<i32>())?];
+        unsafe { self.get_value_raw(&to_cstring(name)?, vals.as_mut_ptr() as *mut c_void)? };
         Ok(vals)
     }
 
     fn set_value_f64(&mut self, name: &str, values: &[f64]) -> BmiResult<()> {
-        check_initialized(self.initialized, &self.name)?;
-        let func = self
-            .bmi
-            .set_value
-            .ok_or_else(|| not_implemented(&self.name, "set_value"))?;
-        let cname = to_cstring(name)?;
-        if unsafe {
-            func(
-                self.bmi.as_mut(),
-                cname.as_ptr(),
-                values.as_ptr() as *mut c_void,
-            )
-        } != BMI_SUCCESS
-        {
-            return Err(function_failed(&self.name, "set_value"));
-        }
-        Ok(())
+        unsafe { self.set_value_raw(&to_cstring(name)?, values.as_ptr() as *mut c_void) }
     }
 
     fn set_value_f32(&mut self, name: &str, values: &[f32]) -> BmiResult<()> {
-        check_initialized(self.initialized, &self.name)?;
-        let func = self
-            .bmi
-            .set_value
-            .ok_or_else(|| not_implemented(&self.name, "set_value"))?;
-        let cname = to_cstring(name)?;
-        if unsafe {
-            func(
-                self.bmi.as_mut(),
-                cname.as_ptr(),
-                values.as_ptr() as *mut c_void,
-            )
-        } != BMI_SUCCESS
-        {
-            return Err(function_failed(&self.name, "set_value"));
-        }
-        Ok(())
+        unsafe { self.set_value_raw(&to_cstring(name)?, values.as_ptr() as *mut c_void) }
     }
 
     fn set_value_i32(&mut self, name: &str, values: &[i32]) -> BmiResult<()> {
+        unsafe { self.set_value_raw(&to_cstring(name)?, values.as_ptr() as *mut c_void) }
+    }
+
+    fn get_value_ptr(&mut self, name: &str) -> BmiResult<Option<NonNull<c_void>>> {
         check_initialized(self.initialized, &self.name)?;
-        let func = self
-            .bmi
-            .set_value
-            .ok_or_else(|| not_implemented(&self.name, "set_value"))?;
+        let Some(func) = self.bmi.get_value_ptr else {
+            return Ok(None);
+        };
         let cname = to_cstring(name)?;
-        if unsafe {
-            func(
-                self.bmi.as_mut(),
-                cname.as_ptr(),
-                values.as_ptr() as *mut c_void,
-            )
-        } != BMI_SUCCESS
-        {
-            return Err(function_failed(&self.name, "set_value"));
+        let mut ptr: *mut c_void = std::ptr::null_mut();
+        if unsafe { func(self.bmi.as_mut(), cname.as_ptr(), &mut ptr) } != BMI_SUCCESS {
+            return Ok(None);
         }
-        Ok(())
+        Ok(NonNull::new(ptr))
+    }
+
+    unsafe fn get_value_into(&self, name: &CStr, dest: &mut BmiValue) -> BmiResult<()> {
+        self.get_value_raw(name, dest.as_mut_ptr())
+    }
+
+    unsafe fn set_value_from(&mut self, name: &CStr, src: &BmiValue) -> BmiResult<()> {
+        self.set_value_raw(name, src.as_bytes().as_ptr() as *mut c_void)
     }
 
     fn get_grid_rank(&self, grid: i32) -> BmiResult<i32> {

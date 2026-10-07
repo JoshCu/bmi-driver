@@ -1,12 +1,14 @@
 use std::collections::HashMap;
+use std::ffi::CStr;
 use std::os::raw::{c_char, c_double, c_float, c_int, c_void};
 use std::path::Path;
+use std::ptr::NonNull;
 
 use super::{check_initialized, cstr_to_string, impl_bmi_drop, to_cstring, verify_config_path};
 use crate::error::{function_failed, BmiError, BmiResult};
 use crate::ffi::BMI_MAX_NAME;
 use crate::library::GlobalLibrary;
-use crate::traits::{parse_time_units, Bmi, VarInfo};
+use crate::traits::{parse_time_units, Bmi, BmiValue, VarInfo, VarType};
 
 type InitFn = unsafe extern "C" fn(*mut c_void, *const c_char) -> c_int;
 type UpdateFn = unsafe extern "C" fn(*mut c_void) -> c_int;
@@ -25,6 +27,7 @@ type GetValueDoubleFn = unsafe extern "C" fn(*mut c_void, *const c_char, *mut c_
 type SetValueIntFn = unsafe extern "C" fn(*mut c_void, *const c_char, *mut c_int) -> c_int;
 type SetValueFloatFn = unsafe extern "C" fn(*mut c_void, *const c_char, *mut c_float) -> c_int;
 type SetValueDoubleFn = unsafe extern "C" fn(*mut c_void, *const c_char, *mut c_double) -> c_int;
+type GetValuePtrFn = unsafe extern "C" fn(*mut c_void, *const c_char, *mut *mut c_void) -> c_int;
 type GridIntFn = unsafe extern "C" fn(*mut c_void, *mut c_int, *mut c_int) -> c_int;
 type GridTypeFn = unsafe extern "C" fn(*mut c_void, *mut c_int, *mut c_char) -> c_int;
 
@@ -55,6 +58,10 @@ struct FortranFns {
     set_value_int: SetValueIntFn,
     set_value_float: SetValueFloatFn,
     set_value_double: SetValueDoubleFn,
+    // Optional: many Fortran BMIs (and the ISO C middleware) don't support pointers.
+    get_value_ptr_int: Option<GetValuePtrFn>,
+    get_value_ptr_float: Option<GetValuePtrFn>,
+    get_value_ptr_double: Option<GetValuePtrFn>,
     get_grid_rank: GridIntFn,
     get_grid_size: GridIntFn,
     get_grid_type: GridTypeFn,
@@ -75,7 +82,7 @@ struct FortranFns {
 ///
 /// **All 29 BMI functions are resolved at load time** and must be present in the library;
 /// unlike `BmiC`, none are optional. They are stored in an internal `FortranFns` struct of typed
-/// function pointers.
+/// function pointers. `get_value_ptr_double` / `_float` / `_int` are also looked up but optional.
 ///
 /// **Lifecycle** — called once per simulation:
 /// - `initialize` — passes the config path as `*const c_char`.
@@ -87,6 +94,10 @@ struct FortranFns {
 ///   the C adapter's single type-erased pointer). The adapter sizes the allocation from the
 ///   cached `nbytes` (see below).
 /// - `set_value_double` / `set_value_float` / `set_value_int` — typed function pointers.
+///
+/// If the library's `get_value_ptr_*` returns a pointer for a coupled variable, the runner reads
+/// and writes that memory directly instead (see `BmiC`). The NOAA-OWP ISO C middleware's
+/// `get_value_ptr_*` always fail, so models loaded through it stay on the calls above.
 ///
 /// **After `initialize`** (setup):
 /// - `get_time_units` — to compute the internal `time_factor`.
@@ -105,8 +116,8 @@ struct FortranFns {
 ///
 /// ## Functions NOT called
 ///
-/// `get_value_ptr`, `get_value_at_indices`, `set_value_at_indices`, and all extended grid
-/// functions are not part of the `FortranFns` struct and are never loaded or called.
+/// `get_value_at_indices`, `set_value_at_indices`, and all extended grid functions are not part
+/// of the `FortranFns` struct and are never loaded or called.
 pub struct BmiFortran {
     model_name: String,
     _model_lib: GlobalLibrary,
@@ -253,6 +264,10 @@ impl BmiFortran {
             set_value_int: load_fn!(lib, "set_value_int", SetValueIntFn),
             set_value_float: load_fn!(lib, "set_value_float", SetValueFloatFn),
             set_value_double: load_fn!(lib, "set_value_double", SetValueDoubleFn),
+            get_value_ptr_int: unsafe { lib.get_fn::<GetValuePtrFn>("get_value_ptr_int") }.ok(),
+            get_value_ptr_float: unsafe { lib.get_fn::<GetValuePtrFn>("get_value_ptr_float") }.ok(),
+            get_value_ptr_double: unsafe { lib.get_fn::<GetValuePtrFn>("get_value_ptr_double") }
+                .ok(),
             get_grid_rank: load_fn!(lib, "get_grid_rank", GridIntFn),
             get_grid_size: load_fn!(lib, "get_grid_size", GridIntFn),
             get_grid_type: load_fn!(lib, "get_grid_type", GridTypeFn),
@@ -621,6 +636,70 @@ impl Bmi for BmiFortran {
         } != 0
         {
             return Err(function_failed(&self.model_name, "set_value_int"));
+        }
+        Ok(())
+    }
+
+    fn get_value_ptr(&mut self, name: &str) -> BmiResult<Option<NonNull<c_void>>> {
+        check_initialized(self.initialized, &self.model_name)?;
+        let func = match self.cached_type(name) {
+            Some(VarType::Double) => self.fns.get_value_ptr_double,
+            Some(VarType::Float) => self.fns.get_value_ptr_float,
+            Some(VarType::Int) => self.fns.get_value_ptr_int,
+            _ => None,
+        };
+        let Some(func) = func else {
+            return Ok(None);
+        };
+        let cname = to_cstring(name)?;
+        let mut ptr: *mut c_void = std::ptr::null_mut();
+        if unsafe { func(self.handle_ptr_mut(), cname.as_ptr(), &mut ptr) } != 0 {
+            return Ok(None);
+        }
+        Ok(NonNull::new(ptr))
+    }
+
+    unsafe fn get_value_into(&self, name: &CStr, dest: &mut BmiValue) -> BmiResult<()> {
+        check_initialized(self.initialized, &self.model_name)?;
+        let (status, func_name) = match dest {
+            BmiValue::Double(v) => (
+                (self.fns.get_value_double)(self.handle_ptr(), name.as_ptr(), v.as_mut_ptr()),
+                "get_value_double",
+            ),
+            BmiValue::Float(v) => (
+                (self.fns.get_value_float)(self.handle_ptr(), name.as_ptr(), v.as_mut_ptr()),
+                "get_value_float",
+            ),
+            BmiValue::Int(v) => (
+                (self.fns.get_value_int)(self.handle_ptr(), name.as_ptr(), v.as_mut_ptr()),
+                "get_value_int",
+            ),
+        };
+        if status != 0 {
+            return Err(function_failed(&self.model_name, func_name));
+        }
+        Ok(())
+    }
+
+    unsafe fn set_value_from(&mut self, name: &CStr, src: &BmiValue) -> BmiResult<()> {
+        check_initialized(self.initialized, &self.model_name)?;
+        let handle = self.handle_ptr_mut();
+        let (status, func_name) = match src {
+            BmiValue::Double(v) => (
+                (self.fns.set_value_double)(handle, name.as_ptr(), v.as_ptr() as *mut c_double),
+                "set_value_double",
+            ),
+            BmiValue::Float(v) => (
+                (self.fns.set_value_float)(handle, name.as_ptr(), v.as_ptr() as *mut c_float),
+                "set_value_float",
+            ),
+            BmiValue::Int(v) => (
+                (self.fns.set_value_int)(handle, name.as_ptr(), v.as_ptr() as *mut c_int),
+                "set_value_int",
+            ),
+        };
+        if status != 0 {
+            return Err(function_failed(&self.model_name, func_name));
         }
         Ok(())
     }

@@ -167,6 +167,17 @@ pub struct ModuleParams {
     pub downsample_mode: DownsampleMode,
     #[serde(default, skip_serializing_if = "is_default_upsample")]
     pub upsample_mode: UpsampleMode,
+    /// Read/write coupled variables through the model's `get_value_ptr` when it provides one.
+    /// Set to `false` for models whose `set_value`/`get_value` do more than copy memory.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub use_value_ptr: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+fn is_true(b: &bool) -> bool {
+    *b
 }
 
 fn is_default_downsample(m: &DownsampleMode) -> bool {

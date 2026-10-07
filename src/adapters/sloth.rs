@@ -1,7 +1,9 @@
 use super::check_initialized;
 use crate::error::{function_failed, BmiResult};
-use crate::traits::{Bmi, VarInfo, VarType};
+use crate::traits::{Bmi, BmiValue, VarInfo, VarType};
 use std::collections::HashMap;
+use std::ffi::c_void;
+use std::ptr::NonNull;
 
 #[derive(Debug, Clone)]
 struct SlothVar {
@@ -10,7 +12,8 @@ struct SlothVar {
     type_str: String,
     units: String,
     location: String,
-    value: f64,
+    /// `count` elements of `var_type`; heap storage so `get_value_ptr` stays valid.
+    data: BmiValue,
 }
 
 pub struct BmiSloth {
@@ -88,6 +91,8 @@ impl BmiSloth {
         let value: f64 = val.trim().parse().map_err(|_| {
             function_failed("SLOTH", format!("Invalid value '{}' for {}", val, name))
         })?;
+        let mut data = BmiValue::zeros(&var_type, count).expect("SLOTH types are always known");
+        data.fill(value);
 
         Ok(Some((
             name,
@@ -97,7 +102,7 @@ impl BmiSloth {
                 type_str,
                 units,
                 location,
-                value,
+                data,
             },
         )))
     }
@@ -213,24 +218,33 @@ impl Bmi for BmiSloth {
     }
 
     fn get_value_f64(&self, name: &str) -> BmiResult<Vec<f64>> {
-        let var = self.get_var(name)?;
-        Ok(vec![var.value; var.count])
+        Ok(self.get_var(name)?.data.as_f64())
     }
 
     fn get_value_f32(&self, name: &str) -> BmiResult<Vec<f32>> {
-        let var = self.get_var(name)?;
-        Ok(vec![var.value as f32; var.count])
+        Ok(self
+            .get_var(name)?
+            .data
+            .as_f64()
+            .iter()
+            .map(|&x| x as f32)
+            .collect())
     }
 
     fn get_value_i32(&self, name: &str) -> BmiResult<Vec<i32>> {
-        let var = self.get_var(name)?;
-        Ok(vec![var.value as i32; var.count])
+        Ok(self
+            .get_var(name)?
+            .data
+            .as_f64()
+            .iter()
+            .map(|&x| x as i32)
+            .collect())
     }
 
     fn set_value_f64(&mut self, name: &str, values: &[f64]) -> BmiResult<()> {
         if let Some(var) = self.variables.get_mut(name) {
             if let Some(&v) = values.first() {
-                var.value = v;
+                var.data.fill(v);
             }
         }
         Ok(())
@@ -239,7 +253,7 @@ impl Bmi for BmiSloth {
     fn set_value_f32(&mut self, name: &str, values: &[f32]) -> BmiResult<()> {
         if let Some(var) = self.variables.get_mut(name) {
             if let Some(&v) = values.first() {
-                var.value = v as f64;
+                var.data.fill(v as f64);
             }
         }
         Ok(())
@@ -248,10 +262,17 @@ impl Bmi for BmiSloth {
     fn set_value_i32(&mut self, name: &str, values: &[i32]) -> BmiResult<()> {
         if let Some(var) = self.variables.get_mut(name) {
             if let Some(&v) = values.first() {
-                var.value = v as f64;
+                var.data.fill(v as f64);
             }
         }
         Ok(())
+    }
+
+    fn get_value_ptr(&mut self, name: &str) -> BmiResult<Option<NonNull<c_void>>> {
+        Ok(self
+            .variables
+            .get_mut(name)
+            .and_then(|var| NonNull::new(var.data.as_mut_ptr())))
     }
 
     fn get_grid_rank(&self, _grid: i32) -> BmiResult<i32> {

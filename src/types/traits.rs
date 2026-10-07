@@ -1,5 +1,7 @@
 use crate::error::{BmiError, BmiResult};
 use std::collections::HashMap;
+use std::ffi::{c_void, CStr};
+use std::ptr::NonNull;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum VarType {
@@ -32,6 +34,14 @@ impl VarType {
             },
         }
     }
+
+    pub fn itemsize(&self) -> Option<usize> {
+        match self {
+            VarType::Double => Some(8),
+            VarType::Float | VarType::Int => Some(4),
+            VarType::Unknown(_) => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -61,6 +71,43 @@ impl BmiValue {
             BmiValue::Double(v) => v.first().copied(),
             BmiValue::Float(v) => v.first().map(|&x| x as f64),
             BmiValue::Int(v) => v.first().map(|&x| x as f64),
+        }
+    }
+
+    /// A zeroed buffer of `count` elements of `var_type`, or `None` for unknown types.
+    pub fn zeros(var_type: &VarType, count: usize) -> Option<Self> {
+        match var_type {
+            VarType::Double => Some(BmiValue::Double(vec![0.0; count])),
+            VarType::Float => Some(BmiValue::Float(vec![0.0; count])),
+            VarType::Int => Some(BmiValue::Int(vec![0; count])),
+            VarType::Unknown(_) => None,
+        }
+    }
+
+    /// Set every element to `value`, converted to the buffer's element type.
+    pub fn fill(&mut self, value: f64) {
+        match self {
+            BmiValue::Double(v) => v.fill(value),
+            BmiValue::Float(v) => v.fill(value as f32),
+            BmiValue::Int(v) => v.fill(value as i32),
+        }
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        let (ptr, len) = match self {
+            BmiValue::Double(v) => (v.as_ptr() as *const u8, std::mem::size_of_val(v.as_slice())),
+            BmiValue::Float(v) => (v.as_ptr() as *const u8, std::mem::size_of_val(v.as_slice())),
+            BmiValue::Int(v) => (v.as_ptr() as *const u8, std::mem::size_of_val(v.as_slice())),
+        };
+        // SAFETY: f64/f32/i32 have no padding or invalid bit patterns when viewed as bytes.
+        unsafe { std::slice::from_raw_parts(ptr, len) }
+    }
+
+    pub fn as_mut_ptr(&mut self) -> *mut c_void {
+        match self {
+            BmiValue::Double(v) => v.as_mut_ptr() as *mut c_void,
+            BmiValue::Float(v) => v.as_mut_ptr() as *mut c_void,
+            BmiValue::Int(v) => v.as_mut_ptr() as *mut c_void,
         }
     }
 }
@@ -106,6 +153,40 @@ pub trait Bmi {
     fn get_grid_rank(&self, grid: i32) -> BmiResult<i32>;
     fn get_grid_size(&self, grid: i32) -> BmiResult<i32>;
     fn get_grid_type(&self, grid: i32) -> BmiResult<String>;
+
+    /// Pointer to the model's own storage for `name` (BMI `get_value_ptr`), or `None` if the
+    /// model doesn't expose one. Only valid until the model is finalized or dropped.
+    fn get_value_ptr(&mut self, _name: &str) -> BmiResult<Option<NonNull<c_void>>> {
+        Ok(None)
+    }
+
+    /// `get_value` into a caller-owned buffer whose variant matches the variable's type, so hot
+    /// loops can skip per-call name conversion and allocation.
+    ///
+    /// # Safety
+    /// `dest` must hold at least `get_var_nbytes(name)` bytes; native models write that many.
+    unsafe fn get_value_into(&self, name: &CStr, dest: &mut BmiValue) -> BmiResult<()> {
+        let name = name.to_str().map_err(|_| BmiError::InvalidUtf8)?;
+        match dest {
+            BmiValue::Double(d) => copy_prefix(d, &self.get_value_f64(name)?),
+            BmiValue::Float(d) => copy_prefix(d, &self.get_value_f32(name)?),
+            BmiValue::Int(d) => copy_prefix(d, &self.get_value_i32(name)?),
+        }
+        Ok(())
+    }
+
+    /// `set_value` from a caller-owned buffer; see [`Bmi::get_value_into`].
+    ///
+    /// # Safety
+    /// `src` must hold at least `get_var_nbytes(name)` bytes; native models read that many.
+    unsafe fn set_value_from(&mut self, name: &CStr, src: &BmiValue) -> BmiResult<()> {
+        let name = name.to_str().map_err(|_| BmiError::InvalidUtf8)?;
+        match src {
+            BmiValue::Double(v) => self.set_value_f64(name, v),
+            BmiValue::Float(v) => self.set_value_f32(name, v),
+            BmiValue::Int(v) => self.set_value_i32(name, v),
+        }
+    }
 
     fn time_factor(&self) -> f64 {
         1.0
@@ -208,6 +289,11 @@ pub trait BmiExt: Bmi {
 }
 
 impl<T: Bmi + ?Sized> BmiExt for T {}
+
+fn copy_prefix<T: Copy>(dest: &mut [T], src: &[T]) {
+    let n = dest.len().min(src.len());
+    dest[..n].copy_from_slice(&src[..n]);
+}
 
 pub fn parse_time_units(units: &str) -> f64 {
     let u = units.to_lowercase();

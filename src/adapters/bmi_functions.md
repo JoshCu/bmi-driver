@@ -29,7 +29,7 @@ functions each adapter actually invokes on the underlying model.
 | `get_value_double` / `f64` | — | ✓ (typed fn ptr) | — |
 | `get_value_float` / `f32` | — | ✓ (typed fn ptr) | — |
 | `get_value_int` / `i32` | — | ✓ (typed fn ptr) | — |
-| `get_value_ptr` | — | — | ✓ + `.tolist()` |
+| `get_value_ptr` | ✓ (runner couples through it when available) | ✓ optional `get_value_ptr_double`/`float`/`int` | ✓ + `.tolist()` |
 | `set_value` | ✓ (type-erased `*mut c_void`) | — | ✓ (via numpy array) |
 | `set_value_double` | — | ✓ (typed fn ptr) | — |
 | `set_value_float` | — | ✓ (typed fn ptr) | — |
@@ -56,8 +56,18 @@ The `ffi::Bmi` C struct exposes additional optional function pointers that are d
 full BMI specification but are not wrapped by the Rust `Bmi` trait and are therefore never
 called by the driver:
 
-- `get_value_ptr`, `get_value_at_indices`, `set_value_at_indices`
+- `get_value_at_indices`, `set_value_at_indices`
 - `get_grid_shape`, `get_grid_spacing`, `get_grid_origin`
 - `get_grid_x`, `get_grid_y`, `get_grid_z`
 - `get_grid_node_count`, `get_grid_edge_count`, `get_grid_face_count`
 - `get_grid_edge_nodes`, `get_grid_face_edges`, `get_grid_face_nodes`, `get_grid_nodes_per_face`
+
+## Direct memory coupling
+
+Before the timestep loop the runner asks each model for `get_value_ptr` on every coupled input
+and output (`src/variables/binding.rs`). A pointer is first checked against the normal
+`set_value`/`get_value` calls and re-queried after each `update`; once it has matched a non-zero
+value (or 48 steps in a row) the runner reads and writes that memory directly and stops calling
+`get_value`/`set_value` for the variable. Variables without a usable pointer — including every
+model loaded through the NOAA-OWP ISO C Fortran middleware, whose `get_value_ptr_*` always fail —
+stay on the calls. Disable per module with `"use_value_ptr": false`.
