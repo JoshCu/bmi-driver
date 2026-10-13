@@ -22,9 +22,6 @@ pub trait Forcings {
 
     fn location_ids(&self) -> BmiResult<Vec<String>>;
     fn location_index(&self, id: &str) -> BmiResult<usize>;
-
-    fn get_f32(&self, name: &str, loc: &str, step: usize) -> BmiResult<f32>;
-    fn get_f64(&self, name: &str, loc: &str, step: usize) -> BmiResult<f64>;
 }
 
 #[derive(Debug, Clone)]
@@ -95,6 +92,18 @@ impl NetCdfForcings {
 
         self.cached_loc = Some(loc_id.to_string());
         Ok(())
+    }
+
+    /// The whole series for `name` at `loc_id`, which must be the location last passed to
+    /// [`preload_location`](Self::preload_location).
+    pub fn cached_series(&self, name: &str, loc_id: &str) -> BmiResult<&[f32]> {
+        if self.cached_loc.as_deref() != Some(loc_id) {
+            return Err(self.err(&format!("location '{}' is not preloaded", loc_id)));
+        }
+        self.cached_data
+            .get(name)
+            .map(Vec::as_slice)
+            .ok_or_else(|| self.err(&format!("Variable '{}' not found", name)))
     }
 
     fn err(&self, msg: &str) -> BmiError {
@@ -310,39 +319,6 @@ impl Forcings for NetCdfForcings {
 
     fn location_index(&self, id: &str) -> BmiResult<usize> {
         self.loc_idx(id)
-    }
-
-    fn get_f32(&self, name: &str, loc: &str, step: usize) -> BmiResult<f32> {
-        if let Some(data) = self
-            .cached_loc
-            .as_ref()
-            .filter(|l| *l == loc)
-            .and_then(|_| self.cached_data.get(name))
-        {
-            return data
-                .get(step)
-                .copied()
-                .ok_or_else(|| self.err("Index out of bounds"));
-        }
-
-        let loc_idx = self.loc_idx(loc)?;
-        let file = self
-            .file
-            .as_ref()
-            .ok_or_else(|| self.err("not initialized"))?;
-        let var = file
-            .variable(name)
-            .ok_or_else(|| self.err(&format!("Variable '{}' not found", name)))?;
-        let vals: Vec<f32> = var
-            .get_values((loc_idx, step..step + 1))
-            .map_err(|e| self.err(&format!("Read error: {}", e)))?;
-        vals.into_iter()
-            .next()
-            .ok_or_else(|| self.err("Empty result"))
-    }
-
-    fn get_f64(&self, name: &str, loc: &str, step: usize) -> BmiResult<f64> {
-        self.get_f32(name, loc, step).map(|v| v as f64)
     }
 }
 

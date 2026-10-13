@@ -2,6 +2,9 @@ use crate::config::{DownsampleMode, UpsampleMode};
 use crate::error::{function_failed, BmiResult};
 use std::collections::HashMap;
 
+/// Timesteps closer than this (in seconds) are treated as equal.
+pub const TIMESTEP_EPSILON: f64 = 1e-9;
+
 fn err(msg: String) -> crate::error::BmiError {
     function_failed("resample", msg)
 }
@@ -14,8 +17,10 @@ fn err(msg: String) -> crate::error::BmiError {
 /// - `dest_dt`: destination timestep in seconds
 /// - `downsample_mode`: how to handle coarser source → finer dest
 /// - `upsample_mode`: how to handle finer source → coarser dest
-pub fn resample_value(
-    source_values: &[f64],
+///
+/// Generic over the element type so `f32` forcing series are read in place, not copied to `f64`.
+pub fn resample_value<T: Copy + Into<f64>>(
+    source_values: &[T],
     source_dt: f64,
     dest_time: f64,
     dest_dt: f64,
@@ -28,10 +33,10 @@ pub fn resample_value(
 
     let ratio = source_dt / dest_dt;
 
-    if (ratio - 1.0).abs() < 1e-9 {
+    if (ratio - 1.0).abs() < TIMESTEP_EPSILON {
         // Same timestep: direct index
         let idx = (dest_time / source_dt).round() as usize;
-        return source_values.get(idx).copied().ok_or_else(|| {
+        return source_values.get(idx).map(|&v| v.into()).ok_or_else(|| {
             err(format!(
                 "index {} out of bounds (len {})",
                 idx,
@@ -51,8 +56,8 @@ pub fn resample_value(
 
 /// Downsample: source has larger timestep than destination.
 /// We need to produce more values from fewer source values.
-fn downsample(
-    source_values: &[f64],
+fn downsample<T: Copy + Into<f64>>(
+    source_values: &[T],
     source_dt: f64,
     dest_time: f64,
     mode: DownsampleMode,
@@ -63,19 +68,19 @@ fn downsample(
     match mode {
         DownsampleMode::Repeat => {
             let idx = lower_idx.min(source_values.len() - 1);
-            Ok(source_values[idx])
+            Ok(source_values[idx].into())
         }
         DownsampleMode::Interpolate => {
             if lower_idx >= source_values.len() {
-                return Ok(*source_values.last().unwrap());
+                return Ok((*source_values.last().unwrap()).into());
             }
             let frac = fractional_idx - lower_idx as f64;
-            let lower_val = source_values[lower_idx];
+            let lower_val: f64 = source_values[lower_idx].into();
             let upper_idx = lower_idx + 1;
             if upper_idx >= source_values.len() || frac.abs() < 1e-12 {
                 return Ok(lower_val);
             }
-            let upper_val = source_values[upper_idx];
+            let upper_val: f64 = source_values[upper_idx].into();
             Ok(lower_val + frac * (upper_val - lower_val))
         }
     }
@@ -83,8 +88,8 @@ fn downsample(
 
 /// Upsample: source has smaller timestep than destination.
 /// We need to aggregate multiple source values into one.
-fn upsample(
-    source_values: &[f64],
+fn upsample<T: Copy + Into<f64>>(
+    source_values: &[T],
     source_dt: f64,
     dest_time: f64,
     dest_dt: f64,
@@ -97,30 +102,61 @@ fn upsample(
     let end_idx = ((window_end / source_dt).ceil() as usize).min(source_values.len());
 
     if start_idx >= source_values.len() {
-        return Ok(*source_values.last().unwrap());
+        return Ok((*source_values.last().unwrap()).into());
     }
 
     let window = &source_values[start_idx..end_idx];
     if window.is_empty() {
-        return Ok(*source_values.last().unwrap());
+        return Ok((*source_values.last().unwrap()).into());
     }
 
     aggregate(window, mode)
 }
 
+/// Resample a forcing series. Same as [`resample_value`] except at the end of the data: a
+/// timestep the forcings don't cover is an error here, where model outputs clamp to the last
+/// value. `name` is only used in error messages.
+pub fn resample_forcing<T: Copy + Into<f64>>(
+    name: &str,
+    source_values: &[T],
+    source_dt: f64,
+    dest_time: f64,
+    dest_dt: f64,
+    downsample_mode: DownsampleMode,
+    upsample_mode: UpsampleMode,
+) -> BmiResult<f64> {
+    let step = (dest_time / source_dt).floor() as usize;
+    if step >= source_values.len() {
+        return Err(err(format!(
+            "forcing '{}' not available at step {}",
+            name, step
+        )));
+    }
+    resample_value(
+        source_values,
+        source_dt,
+        dest_time,
+        dest_dt,
+        downsample_mode,
+        upsample_mode,
+    )
+}
+
 /// Aggregate a slice of values using the given mode.
-pub fn aggregate(values: &[f64], mode: UpsampleMode) -> BmiResult<f64> {
+pub fn aggregate<T: Copy + Into<f64>>(values: &[T], mode: UpsampleMode) -> BmiResult<f64> {
     if values.is_empty() {
         return Err(err("empty values for aggregation".into()));
     }
+    let n = values.len();
+    let values = values.iter().map(|&v| v.into());
 
     match mode {
-        UpsampleMode::Mean => Ok(values.iter().sum::<f64>() / values.len() as f64),
-        UpsampleMode::Min => Ok(values.iter().copied().fold(f64::INFINITY, f64::min)),
-        UpsampleMode::Max => Ok(values.iter().copied().fold(f64::NEG_INFINITY, f64::max)),
+        UpsampleMode::Mean => Ok(values.sum::<f64>() / n as f64),
+        UpsampleMode::Min => Ok(values.fold(f64::INFINITY, f64::min)),
+        UpsampleMode::Max => Ok(values.fold(f64::NEG_INFINITY, f64::max)),
         UpsampleMode::Mode => {
             let mut counts: HashMap<i64, usize> = HashMap::new();
-            for &v in values {
+            for v in values {
                 *counts.entry(v.round() as i64).or_insert(0) += 1;
             }
             let best = counts.into_iter().max_by_key(|&(_, c)| c).unwrap();
@@ -398,7 +434,77 @@ mod tests {
 
     #[test]
     fn test_aggregate_empty() {
-        let result = aggregate(&[], UpsampleMode::Mean);
+        let result = aggregate::<f64>(&[], UpsampleMode::Mean);
         assert!(result.is_err());
+    }
+
+    fn forcing(
+        values: &[f32],
+        source_dt: f64,
+        dest_time: f64,
+        dest_dt: f64,
+        down: DownsampleMode,
+    ) -> BmiResult<f64> {
+        resample_forcing(
+            "f",
+            values,
+            source_dt,
+            dest_time,
+            dest_dt,
+            down,
+            UpsampleMode::Mean,
+        )
+    }
+
+    #[test]
+    fn test_forcing_reads_f32_in_place() {
+        let v = [1.5f32, 2.25, 0.1];
+        for (i, &x) in v.iter().enumerate() {
+            let got = forcing(
+                &v,
+                3600.0,
+                i as f64 * 3600.0,
+                3600.0,
+                DownsampleMode::Repeat,
+            );
+            assert_eq!(got.unwrap(), x as f64);
+        }
+    }
+
+    #[test]
+    fn test_forcing_downsample_and_upsample() {
+        let v = [0.0f32, 10.0, 20.0, 30.0];
+        let interp = forcing(&v, 3600.0, 1800.0, 1800.0, DownsampleMode::Interpolate);
+        assert_eq!(interp.unwrap(), 5.0);
+        let repeat = forcing(&v, 3600.0, 5400.0, 1800.0, DownsampleMode::Repeat);
+        assert_eq!(repeat.unwrap(), 10.0);
+        // Two-hour window over hourly data: mean of 10 and 20.
+        let up = forcing(&v, 3600.0, 3600.0, 7200.0, DownsampleMode::Repeat);
+        assert_eq!(up.unwrap(), 15.0);
+        // A window that runs off the end aggregates what is there.
+        let tail = forcing(&v, 3600.0, 3.0 * 3600.0, 7200.0, DownsampleMode::Repeat);
+        assert_eq!(tail.unwrap(), 30.0);
+    }
+
+    #[test]
+    fn test_forcing_errors_past_end_of_data() {
+        // Unlike model outputs, forcings don't clamp to their last value.
+        let v = [1.0f32, 2.0];
+        assert!(forcing(&v, 3600.0, 2.0 * 3600.0, 3600.0, DownsampleMode::Repeat).is_err());
+        assert!(forcing(&v, 3600.0, 4.0 * 3600.0, 1800.0, DownsampleMode::Repeat).is_err());
+        assert!(forcing(&v, 3600.0, 2.0 * 3600.0, 7200.0, DownsampleMode::Repeat).is_err());
+        // Interpolating toward a missing next value keeps the last one.
+        let last = forcing(&v, 3600.0, 5400.0, 1800.0, DownsampleMode::Interpolate);
+        assert_eq!(last.unwrap(), 2.0);
+        // ...as model outputs do throughout.
+        let out = resample_value(
+            &[1.0f64, 2.0],
+            3600.0,
+            4.0 * 3600.0,
+            1800.0,
+            DownsampleMode::Repeat,
+            UpsampleMode::Mean,
+        );
+        assert_eq!(out.unwrap(), 2.0);
     }
 }
