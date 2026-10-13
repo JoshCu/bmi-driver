@@ -1,6 +1,6 @@
 [package]
 name = "bmi-driver"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Basic Model Interface (BMI) driver with support for C Fortran, and Python models."
 license = "MIT"
@@ -9,7 +9,7 @@ repository = "https://github.com/JoshCu/bmi-driver"
 readme = "README.md"
 
 [features]
-default = ["zarr", "parquet"]
+default = []
 python = ["dep:pyo3"]
 zarr = ["dep:zarrs"]
 parquet = ["dep:parquet", "dep:arrow-array", "dep:arrow-schema"]

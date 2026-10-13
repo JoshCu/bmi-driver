@@ -5,12 +5,12 @@ A parallel BMI (Basic Model Interface) orchestrator that dynamically loads and c
 ## Building
 
 ```bash
-cargo build --release            # All adapters (C, Fortran, Python, Zarr, Parquet)
-cargo build --release --no-default-features   # C adapter only (fewest deps)
+cargo build --release            # C and Fortran adapters, CSV and NetCDF output
+cargo build --release --features python,zarr,parquet   # Everything
 cargo install --path .           # Install to ~/.cargo/bin/
 ```
 
-Feature flags: `fortran`, `python`, `zarr`, `parquet` (all enabled by default).
+Feature flags (all off by default): `python` (Python adapter), `zarr` and `parquet` (output formats), `static` (statically link NetCDF and SQLite). C and Fortran support is always built.
 
 ### System dependencies
 
@@ -90,7 +90,7 @@ See [docs/configuration.md](docs/configuration.md) for all field reference table
 
 ## Output
 
-Output format is set via `output_format` in the config (`"csv"`, `"netcdf"`, `"zarr"`, or `"parquet"`). Default is CSV.
+Output format is set via `output_format` in the config (`"csv"`, `"netcdf"`, `"zarr"`, or `"parquet"`). Default is CSV. Zarr and Parquet need the `zarr` and `parquet` features.
 
 - **CSV**: One file per location at `outputs/bmi-driver/<location_id>.csv`
 - **NetCDF**: Single `outputs/bmi-driver/results.nc` with dimensions `[id, time]`

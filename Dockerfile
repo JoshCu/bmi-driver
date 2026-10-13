@@ -3,7 +3,7 @@ WORKDIR /build
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | bash -s -- -y
 RUN dnf install -y python3.11-devel g++ cmake
 COPY . .
-RUN cargo build --release --features static
+RUN cargo build --release --features static,zarr,parquet
 
 FROM ngiab_build AS rs_route
 RUN dnf install -y gfortran

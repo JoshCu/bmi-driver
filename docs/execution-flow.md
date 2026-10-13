@@ -121,13 +121,14 @@ After each `model.update()`, the runner calls `get_value()` for each of the mode
 
 ## Output Writing
 
-The runner supports three output formats, all implementing the `DivideDataStore` trait:
+The runner supports four output formats, all implementing the `DivideDataStore` trait:
 
 | Format | File | Behavior |
 |--------|------|----------|
 | **CSV** | `src/output/csv.rs` | One file per location at `<data_dir>/outputs/bmi-driver/<loc_id>.csv` with columns for time and each output variable |
 | **NetCDF** | `src/output/netcdf.rs` | Each worker writes a temporary `.nc` file; the parent merges them into `results.nc` |
-| **Zarr** | `src/output/zarr.rs` | Parent pre-creates the store with all dimensions; workers write slices in parallel |
+| **Zarr** | `src/output/zarr.rs` | Parent pre-creates the store with all dimensions; workers write slices in parallel. Requires `--features zarr` |
+| **Parquet** | `src/output/parquet.rs` | Single `results.parquet` in long format, one row per `(id, time)`. Requires `--features parquet` |
 
 ## Summary Diagram
 

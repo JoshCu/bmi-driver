@@ -31,8 +31,6 @@ This function fills in the `Bmi` struct's function pointers and returns the poin
 
 ## bmi_fortran -- Fortran shared libraries
 
-**Requires:** `--features fortran`
-
 Loads Fortran BMI models. The adapter supports two modes:
 
 1. **Single library** -- the `.so` implements both the registration function and the BMI interface directly.
