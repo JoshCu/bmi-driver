@@ -255,6 +255,7 @@ dependencies = [
  "indicatif",
  "ipc-channel",
  "netcdf",
+ "netcdf-sys",
  "parquet",
  "pyo3",
  "rusqlite",
