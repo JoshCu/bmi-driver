@@ -1,18 +1,17 @@
 use std::fs::File;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
 
 use arrow_array::{
     ArrayRef, Float32Array, Int64Array, RecordBatch, StringArray, TimestampMillisecondArray,
 };
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::arrow_writer::ArrowWriter;
 use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::properties::WriterProperties;
+use parquet::schema::types::ColumnPath;
 
 use super::LocationResult;
 use crate::error::{function_failed, BmiError, BmiResult};
@@ -28,6 +27,10 @@ enum WriterMessage {
 
 /// Long-format Parquet writer: one row per (location, timestep), columns are
 /// `id`, `time_step`, `time`, followed by one column per output variable.
+///
+/// Each worker writes its own file into a Parquet dataset directory
+/// (`results.parquet/part-<worker>.parquet`), which pandas, polars, pyarrow,
+/// DuckDB and Spark all read as one table, so no merge step is needed.
 pub struct ParquetWriter {
     sender: Sender<WriterMessage>,
     handle: Option<JoinHandle<BmiResult<()>>>,
@@ -35,13 +38,21 @@ pub struct ParquetWriter {
 }
 
 impl ParquetWriter {
-    pub fn new(path: PathBuf, start_epoch: i64, interval: i64) -> BmiResult<Self> {
+    /// `var_names` fixes the variable columns and their order, so every
+    /// worker's file has the same schema. If it is empty, the columns of the
+    /// first location written are used instead.
+    pub fn new(
+        path: PathBuf,
+        start_epoch: i64,
+        interval: i64,
+        var_names: Vec<String>,
+    ) -> BmiResult<Self> {
         let (tx, rx) = mpsc::channel();
         let thread_error: Arc<Mutex<Option<BmiError>>> = Arc::new(Mutex::new(None));
         let thread_error_clone = Arc::clone(&thread_error);
 
         let handle = thread::spawn(move || {
-            let result = writer_thread(rx, path, start_epoch, interval);
+            let result = writer_thread(rx, path, start_epoch, interval, var_names);
             if let Err(ref e) = result {
                 if let Ok(mut guard) = thread_error_clone.lock() {
                     *guard = Some(BmiError::FunctionFailed {
@@ -115,9 +126,15 @@ fn build_schema(var_names: &[String]) -> Arc<Schema> {
     Arc::new(Schema::new(fields))
 }
 
+/// Rows per row group. Each location's rows are contiguous, so row-group
+/// statistics on `id` let readers skip data when filtering by catchment.
+const MAX_ROW_GROUP_SIZE: usize = 1024 * 1024;
+
 fn writer_properties() -> WriterProperties {
     WriterProperties::builder()
         .set_compression(Compression::ZSTD(ZstdLevel::default()))
+        .set_max_row_group_row_count(Some(MAX_ROW_GROUP_SIZE))
+        .set_column_dictionary_enabled(ColumnPath::from("id"), true)
         .build()
 }
 
@@ -134,18 +151,28 @@ fn build_batch(
     let mut var_values: Vec<Vec<f32>> = vec![Vec::new(); var_names.len()];
 
     for result in batch {
-        let n_steps = result.columns.first().map(|(_, v)| v.len()).unwrap_or(0);
+        // Look each variable up once per location, not once per row.
+        let series: Vec<Option<&Vec<f64>>> = var_names
+            .iter()
+            .map(|name| {
+                result
+                    .columns
+                    .iter()
+                    .find(|(col_name, _)| col_name == name)
+                    .map(|(_, vals)| vals)
+            })
+            .collect();
+        // Series can differ in length; emit rows up to the longest one and
+        // fill the gaps in shorter or missing series with NaN.
+        let n_steps = series.iter().flatten().map(|v| v.len()).max().unwrap_or(0);
         for step in 0..n_steps {
             ids.push(result.location_id.clone());
             time_steps.push(step as i64);
             times.push((start_epoch + (step as i64) * interval) * 1000);
-            for (i, name) in var_names.iter().enumerate() {
-                let val = result
-                    .columns
-                    .iter()
-                    .find(|(col_name, _)| col_name == name)
-                    .map(|(_, vals)| vals[step] as f32)
-                    .unwrap_or(f32::NAN);
+            for (i, vals) in series.iter().enumerate() {
+                let val = vals
+                    .and_then(|v| v.get(step))
+                    .map_or(f32::NAN, |&v| v as f32);
                 var_values[i].push(val);
             }
         }
@@ -169,139 +196,50 @@ fn writer_thread(
     path: PathBuf,
     start_epoch: i64,
     interval: i64,
+    mut var_names: Vec<String>,
 ) -> BmiResult<()> {
-    let mut writer: Option<ArrowWriter<File>> = None;
-    let mut schema: Option<Arc<Schema>> = None;
-    let mut var_names: Vec<String> = Vec::new();
+    let mut writer: Option<(ArrowWriter<File>, Arc<Schema>)> = None;
     let mut batch: Vec<LocationResult> = Vec::new();
-    // Larger batches produce fewer, bigger row groups, which compress better.
+    // Larger batches mean fewer, bigger writes; ArrowWriter buffers them
+    // into row groups of MAX_ROW_GROUP_SIZE.
     let batch_size = 500;
 
-    let flush_batch = |writer: &mut Option<ArrowWriter<File>>,
-                       schema: &mut Option<Arc<Schema>>,
-                       var_names: &mut Vec<String>,
-                       batch: &mut Vec<LocationResult>|
-     -> BmiResult<()> {
+    let mut flush_batch = |batch: &mut Vec<LocationResult>| -> BmiResult<()> {
         if batch.is_empty() {
             return Ok(());
         }
         if writer.is_none() {
-            let names: Vec<String> = batch[0].columns.iter().map(|(n, _)| n.clone()).collect();
-            let s = build_schema(&names);
+            if var_names.is_empty() {
+                var_names = batch[0].columns.iter().map(|(n, _)| n.clone()).collect();
+            }
+            let schema = build_schema(&var_names);
             let file = File::create(&path)
                 .map_err(|e| err(format!("Failed to create {}: {}", path.display(), e)))?;
-            let w = ArrowWriter::try_new(file, s.clone(), Some(writer_properties()))
+            let w = ArrowWriter::try_new(file, schema.clone(), Some(writer_properties()))
                 .map_err(|e| err(format!("Failed to create writer: {}", e)))?;
-            *var_names = names;
-            *schema = Some(s);
-            *writer = Some(w);
+            writer = Some((w, schema));
         }
-        let record_batch = build_batch(
-            schema.as_ref().unwrap(),
-            var_names,
-            batch,
-            start_epoch,
-            interval,
-        )?;
-        writer
-            .as_mut()
-            .unwrap()
-            .write(&record_batch)
+        let (w, schema) = writer.as_mut().unwrap();
+        let record_batch = build_batch(schema, &var_names, batch, start_epoch, interval)?;
+        w.write(&record_batch)
             .map_err(|e| err(format!("Failed to write batch: {}", e)))?;
         batch.clear();
         Ok(())
     };
 
-    loop {
-        match receiver.recv_timeout(Duration::from_millis(100)) {
-            Ok(WriterMessage::Write(result)) => {
-                batch.push(result);
-                if batch.len() >= batch_size {
-                    flush_batch(&mut writer, &mut schema, &mut var_names, &mut batch)?;
-                }
-            }
-            Ok(WriterMessage::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => {
-                flush_batch(&mut writer, &mut schema, &mut var_names, &mut batch)?;
-                break;
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                flush_batch(&mut writer, &mut schema, &mut var_names, &mut batch)?;
-            }
+    // Block until the next result arrives; flush only when a batch is full
+    // or at shutdown.
+    while let Ok(WriterMessage::Write(result)) = receiver.recv() {
+        batch.push(result);
+        if batch.len() >= batch_size {
+            flush_batch(&mut batch)?;
         }
     }
+    flush_batch(&mut batch)?;
 
-    if let Some(w) = writer {
+    if let Some((w, _)) = writer {
         w.close()
             .map_err(|e| err(format!("Failed to close writer: {}", e)))?;
     }
-    Ok(())
-}
-
-/// Merge multiple per-worker Parquet files into a single output file.
-pub fn merge_parquet_files(worker_files: &[PathBuf], output_path: &Path) -> BmiResult<()> {
-    if worker_files.is_empty() {
-        return Ok(());
-    }
-
-    if worker_files.len() == 1 {
-        std::fs::rename(&worker_files[0], output_path).map_err(|e| {
-            err(format!(
-                "Failed to rename {} to {}: {}",
-                worker_files[0].display(),
-                output_path.display(),
-                e
-            ))
-        })?;
-        return Ok(());
-    }
-
-    let first_file = File::open(&worker_files[0]).map_err(|e| {
-        err(format!(
-            "Failed to open {}: {}",
-            worker_files[0].display(),
-            e
-        ))
-    })?;
-    let schema = ParquetRecordBatchReaderBuilder::try_new(first_file)
-        .map_err(|e| err(format!("Failed to read schema: {}", e)))?
-        .schema()
-        .clone();
-
-    let out_file = File::create(output_path)
-        .map_err(|e| err(format!("Failed to create {}: {}", output_path.display(), e)))?;
-    let mut writer = ArrowWriter::try_new(out_file, schema, Some(writer_properties()))
-        .map_err(|e| err(format!("Failed to create merged writer: {}", e)))?;
-
-    for worker_path in worker_files {
-        let file = File::open(worker_path)
-            .map_err(|e| err(format!("Failed to open {}: {}", worker_path.display(), e)))?;
-        let reader = ParquetRecordBatchReaderBuilder::try_new(file)
-            .map_err(|e| {
-                err(format!(
-                    "Failed to open reader for {}: {}",
-                    worker_path.display(),
-                    e
-                ))
-            })?
-            .build()
-            .map_err(|e| {
-                err(format!(
-                    "Failed to build reader for {}: {}",
-                    worker_path.display(),
-                    e
-                ))
-            })?;
-        for batch in reader {
-            let batch = batch.map_err(|e| err(format!("Failed to read batch: {}", e)))?;
-            writer
-                .write(&batch)
-                .map_err(|e| err(format!("Failed to write merged batch: {}", e)))?;
-        }
-        let _ = std::fs::remove_file(worker_path);
-    }
-
-    writer
-        .close()
-        .map_err(|e| err(format!("Failed to close merged writer: {}", e)))?;
     Ok(())
 }
