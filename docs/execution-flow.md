@@ -42,7 +42,7 @@ Workers report progress by printing a count to stdout after each completed locat
 
 ### Finalization
 
-After all workers complete, the parent handles any output merging. For NetCDF output, each worker writes a temporary file that the parent merges into a single `results.nc`. For Zarr output, workers write directly to a shared pre-allocated store, so no merge is needed.
+After all workers complete, the parent handles any output merging. For NetCDF output, each worker writes a temporary file that the parent merges into a single `results.nc`. For Zarr output, workers write directly to a shared pre-allocated store, so no merge is needed. For Parquet output, each worker writes one part of a dataset directory (`results.parquet/part-<worker>.parquet`), which readers treat as a single table, so no merge is needed either.
 
 ## Worker Mode
 
