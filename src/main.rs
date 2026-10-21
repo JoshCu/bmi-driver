@@ -63,29 +63,6 @@ fn load_toml_config() -> TomlConfig {
     }
 }
 
-/// Resolve which output variables to write based on the realization config.
-///
-/// - `output_variables: ["all"]` → None (write all available variables)
-/// - `output_variables: [...]`   → Some(list) (write only those)
-/// - `output_variables` empty    → Some(vec![main_output_variable])
-fn resolve_output_vars(config: &bmi_driver::config::RealizationConfig) -> Option<Vec<String>> {
-    let formulation = config.global.formulations.first()?;
-    let output_vars = &formulation.params.output_variables;
-
-    if output_vars.len() == 1 && output_vars[0].eq_ignore_ascii_case("all") {
-        None
-    } else if output_vars.is_empty() {
-        let main = &formulation.params.main_output_variable;
-        if main.is_empty() {
-            None
-        } else {
-            Some(vec![main.clone()])
-        }
-    } else {
-        Some(output_vars.clone())
-    }
-}
-
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
@@ -225,7 +202,7 @@ fn run_parent(
             // Discover output variable names for zarr (needs to create arrays upfront)
             #[cfg(feature = "zarr")]
             {
-                if let Some(vars) = resolve_output_vars(&runner.config) {
+                if let Some(vars) = runner.config.output_variables() {
                     discovered_vars = vars;
                 } else {
                     // "all" or no main_output — discover from models
@@ -629,7 +606,7 @@ fn run_worker(data_dir: &PathBuf, ipc_server_name: &str) -> Result<(), BmiError>
     let interval = runner.config.time.output_interval;
     let output_format = runner.config.output_format;
     let output_path = data_dir.join(&runner.config.output_root);
-    let output_vars = resolve_output_vars(&runner.config);
+    let output_vars = runner.config.output_variables();
 
     let mut store = create_output_store(
         output_format,

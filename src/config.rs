@@ -1,6 +1,6 @@
 use crate::error::{BmiError, BmiResult};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 
@@ -267,6 +267,42 @@ impl RealizationConfig {
             .formulations
             .first()
             .map(|f| f.params.main_output_variable.as_str())
+    }
+
+    /// Resolve which output variables to write.
+    ///
+    /// - `output_variables: ["all"]` → None (write all available variables)
+    /// - `output_variables: [...]`   → Some(list) (write only those)
+    /// - `output_variables` empty    → Some(vec![main_output_variable])
+    pub fn output_variables(&self) -> Option<Vec<String>> {
+        let formulation = self.global.formulations.first()?;
+        let output_vars = &formulation.params.output_variables;
+
+        if output_vars.len() == 1 && output_vars[0].eq_ignore_ascii_case("all") {
+            None
+        } else if output_vars.is_empty() {
+            let main = &formulation.params.main_output_variable;
+            if main.is_empty() {
+                None
+            } else {
+                Some(vec![main.clone()])
+            }
+        } else {
+            Some(output_vars.clone())
+        }
+    }
+
+    /// Model outputs the runner must read: every coupled source plus the written outputs.
+    /// None means every output is needed (`output_variables: ["all"]`).
+    pub fn required_outputs(&self) -> Option<HashSet<String>> {
+        let mut needed: HashSet<String> = self.output_variables()?.into_iter().collect();
+        if let Some(main) = self.main_output().filter(|m| !m.is_empty()) {
+            needed.insert(main.to_string());
+        }
+        for module in self.modules() {
+            needed.extend(module.params.variables_names_map.values().cloned());
+        }
+        Some(needed)
     }
 }
 

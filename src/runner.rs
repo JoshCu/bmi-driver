@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::adapters::BmiFortran;
@@ -68,6 +68,9 @@ pub struct ModelRunner {
     pub suppress_warnings: bool,
     pub source_timesteps: HashMap<String, TimestepInfo>,
     pub simulation_span_seconds: f64,
+    /// Model outputs read each step; None reads all of them (see
+    /// [`RealizationConfig::required_outputs`]).
+    pub required_outputs: Option<HashSet<String>>,
 }
 
 impl ModelRunner {
@@ -90,6 +93,7 @@ impl ModelRunner {
             suppress_warnings: false,
             source_timesteps: HashMap::new(),
             simulation_span_seconds: 0.0,
+            required_outputs: None,
         })
     }
 
@@ -125,6 +129,7 @@ impl ModelRunner {
             num_steps: forcing_steps,
         };
 
+        self.required_outputs = self.config.required_outputs();
         self.vars.clear();
         self.source_timesteps.clear();
         for name in self.forcings.var_names()? {
@@ -423,7 +428,12 @@ impl ModelRunner {
         let (downsample_mode, upsample_mode, use_ptr) =
             (*downsample_mode, *upsample_mode, *use_value_ptr);
         let model_steps = model_ts.num_steps;
-        let output_names: Vec<String> = model.get_output_var_names()?;
+        let required = self.required_outputs.as_ref();
+        let output_names: Vec<String> = model
+            .get_output_var_names()?
+            .into_iter()
+            .filter(|name| required.map_or(true, |r| r.contains(name)))
+            .collect();
 
         // Resolve every coupled variable once so the loop below does no lookups or allocation.
         let mut inputs = Vec::with_capacity(input_map.len());
