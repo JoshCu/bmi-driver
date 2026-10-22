@@ -137,13 +137,8 @@ fn test_netcdf_roundtrip() {
     let data = generate_data();
 
     let nc_path = dir.path().join("test.nc");
-    let mut store = bmi_driver::output::netcdf::NetCdfWriter::new(
-        nc_path.clone(),
-        START_TIME,
-        INTERVAL,
-        N_STEPS - 1, // total_steps = N_STEPS - 1 because n_times = total_steps + 1
-    )
-    .unwrap();
+    create_netcdf(&nc_path);
+    let mut store = bmi_driver::output::netcdf::NetCdfWriter::new(nc_path.clone(), 0).unwrap();
     write_all(&mut store, &data);
 
     let read_back = read_netcdf_data(&nc_path);
@@ -165,6 +160,88 @@ fn test_netcdf_roundtrip() {
             }
         }
     }
+}
+
+fn create_netcdf(path: &Path) {
+    let loc_ids: Vec<String> = LOCATIONS.iter().map(|s| s.to_string()).collect();
+    let var_names: Vec<String> = VAR_NAMES.iter().map(|s| s.to_string()).collect();
+    bmi_driver::output::netcdf::create_netcdf_store(
+        path,
+        START_TIME,
+        INTERVAL,
+        N_STEPS - 1, // total_steps = N_STEPS - 1 because n_times = total_steps + 1
+        &loc_ids,
+        &var_names,
+    )
+    .unwrap();
+}
+
+#[test]
+fn test_netcdf_shared_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = generate_data();
+
+    let nc_path = dir.path().join("results.nc");
+    create_netcdf(&nc_path);
+
+    // One writer per location, as separate workers would be, with their writes
+    // interleaved in the same file. Written in reverse to prove rows land by index.
+    let mut stores: Vec<_> = (0..data.len())
+        .map(|i| bmi_driver::output::netcdf::NetCdfWriter::new(nc_path.clone(), i).unwrap())
+        .collect();
+    for (store, (loc_id, columns)) in stores.iter_mut().zip(&data).rev() {
+        store.write_location(loc_id, columns).unwrap();
+    }
+    for store in &mut stores {
+        store.finish().unwrap();
+    }
+
+    let file = netcdf::open(&nc_path).unwrap();
+    assert!(!file.dimension("id").unwrap().is_unlimited(), "id dimension should be fixed-size");
+    // Readers (e.g. xarray) mask missing data using the _FillValue attribute
+    let fill = file.variable(VAR_NAMES[0]).unwrap().attribute_value("_FillValue");
+    assert!(
+        matches!(fill, Some(Ok(netcdf::AttributeValue::Float(v))) if v == -9999.0),
+        "unexpected _FillValue: {:?}",
+        fill
+    );
+    drop(file);
+
+    let read_back = read_netcdf_data(&nc_path);
+    assert_eq!(read_back.len(), data.len());
+    for (orig, read) in data.iter().zip(read_back.iter()) {
+        assert_eq!(orig.0, read.0, "location ID mismatch");
+        for (orig_col, read_col) in orig.1.iter().zip(read.1.iter()) {
+            assert_eq!(orig_col.0, read_col.0, "variable name mismatch");
+            assert_eq!(orig_col.1.len(), read_col.1.len());
+            for (o, r) in orig_col.1.iter().zip(read_col.1.iter()) {
+                assert!((o - r).abs() < 1e-2, "{}: {} vs {}", orig_col.0, o, r);
+            }
+        }
+    }
+}
+
+#[test]
+fn test_netcdf_pads_missing_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let nc_path = dir.path().join("results.nc");
+    create_netcdf(&nc_path);
+
+    // Short rows are padded and missing variables written as fill
+    let mut store = bmi_driver::output::netcdf::NetCdfWriter::new(nc_path.clone(), 0).unwrap();
+    for loc in LOCATIONS {
+        store
+            .write_location(loc, &[(VAR_NAMES[0].to_string(), vec![1.0, 2.0])])
+            .unwrap();
+    }
+    store.finish().unwrap();
+
+    let file = netcdf::open(&nc_path).unwrap();
+    let first: Vec<f32> = file.variable(VAR_NAMES[0]).unwrap().get_values((1, ..)).unwrap();
+    assert_eq!(&first[..2], &[1.0, 2.0]);
+    assert!(first[2..].iter().all(|&v| v == -9999.0));
+    let other: Vec<f32> = file.variable(VAR_NAMES[1]).unwrap().get_values(..).unwrap();
+    assert!(other.iter().all(|&v| v == -9999.0));
 }
 
 // --- Zarr ---
@@ -366,13 +443,8 @@ fn test_all_formats_equivalent() {
 
     // Write NetCDF
     let nc_path = dir.path().join("test.nc");
-    let mut nc_store = bmi_driver::output::netcdf::NetCdfWriter::new(
-        nc_path.clone(),
-        START_TIME,
-        INTERVAL,
-        N_STEPS - 1,
-    )
-    .unwrap();
+    create_netcdf(&nc_path);
+    let mut nc_store = bmi_driver::output::netcdf::NetCdfWriter::new(nc_path.clone(), 0).unwrap();
     write_all(&mut nc_store, &data);
 
     // Write Zarr
