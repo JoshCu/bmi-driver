@@ -9,6 +9,10 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::thread;
 
+mod build_info {
+    include!(concat!(env!("OUT_DIR"), "/build_info.rs"));
+}
+
 #[derive(Debug, Clone, Copy, clap::ValueEnum, serde::Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 enum ProgressMode {
@@ -64,9 +68,14 @@ fn load_toml_config() -> TomlConfig {
 }
 
 #[derive(Parser, Debug)]
-#[command(version, about, long_about = None)]
+#[command(version = build_info::VERSION, about, long_about = None)]
 struct Args {
-    data_dir: PathBuf,
+    #[arg(required_unless_present = "metadata")]
+    data_dir: Option<PathBuf>,
+
+    /// Print build details (commit, profile, features, target, dependency versions) and exit
+    #[arg(short = 'M', long)]
+    metadata: bool,
 
     /// Path to the realization.json file
     #[arg(long)]
@@ -112,7 +121,11 @@ struct Args {
 
 fn main() -> Result<(), BmiError> {
     let args = Args::parse();
-    let data_dir = fs::canonicalize(&args.data_dir).unwrap();
+    if args.metadata {
+        print!("{}", build_info::METADATA);
+        return Ok(());
+    }
+    let data_dir = fs::canonicalize(args.data_dir.as_ref().unwrap()).unwrap();
     // Resolve optional paths before changing the working directory
     let config_arg = args.config.map(|p| fs::canonicalize(&p).unwrap());
     let hf_arg = args.hf.map(|p| fs::canonicalize(&p).unwrap());

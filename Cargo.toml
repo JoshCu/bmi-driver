@@ -1,6 +1,6 @@
 [package]
 name = "bmi-driver"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "Basic Model Interface (BMI) driver with support for C Fortran, and Python models."
 license = "MIT"
@@ -39,3 +39,6 @@ tempfile = "3"
 [[bin]]
 name = "bmi-driver"
 path = "src/main.rs"
+
+[build-dependencies]
+serde_json = "1.0"

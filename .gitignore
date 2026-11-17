@@ -4,3 +4,5 @@ libs
 *.nc
 test_data/*
 !test_data/*.tar.gz
+settings.local.json
+crates
